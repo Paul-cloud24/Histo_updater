@@ -3,6 +3,8 @@ import numpy as np
 import pandas as pd
 import torch
 import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use("Agg")
 
 from cellpose import models
 from skimage.measure import regionprops_table

@@ -22,7 +22,7 @@ def detect_channels(image_path, stain_type):
 
             for word in keywords:
 
-                if word.lower() in name.slower():
+                if word.lower() in name.lower():
 
                     mapping[key] = i
     
@@ -33,23 +33,49 @@ def detect_channels(image_path, stain_type):
 
 
 def extract_channels(image_path, stain_type):
-
     img = imread(image_path)
-
     mapping = detect_channels(image_path, stain_type)
 
-    if len(mapping) >= 2:
+    # Bug 2: mapping könnte "dapi" oder "marker"-Key nicht enthalten
+    # → explizit prüfen statt len(mapping) >= 2
+    if "dapi" in mapping and len(mapping) >= 2:
+        dapi_idx = mapping["dapi"]
 
-        dapi = img[..., mapping["dapi"]]
-        marker = img[..., list(mapping.values())[1]]
+        # zweiten Kanal (nicht DAPI) aus mapping holen
+        marker_key = next(k for k in mapping if k != "dapi")
+        marker_idx = mapping[marker_key]
 
-        return np.stack([dapi, marker], axis=-1)
+        # Robustheit: Channel-Achse ermitteln
+        # tifffile lädt meistens als (C, H, W) oder (H, W, C)
+        if img.ndim == 3:
+            # (C, H, W) wenn C klein ist (< 10), sonst (H, W, C)
+            if img.shape[0] < 10:
+                dapi   = img[dapi_idx]
+                marker = img[marker_idx]
+            else:
+                dapi   = img[..., dapi_idx]
+                marker = img[..., marker_idx]
+            return np.stack([dapi, marker], axis=-1)
+
+        elif img.ndim == 4:
+            # z.B. (Z, C, H, W) → max-projection über Z
+            if img.shape[1] < 10:
+                dapi   = img[:, dapi_idx].max(axis=0)
+                marker = img[:, marker_idx].max(axis=0)
+                return np.stack([dapi, marker], axis=-1)
 
     # Fallback wenn keine Metadaten
     print("Keine Kanalmetadaten gefunden → Fallback")
 
     if img.ndim == 3:
+        # (C, H, W) → transpose zu (H, W, C)
+        if img.shape[0] < 10:
+            return img[:2].transpose(1, 2, 0)
         return img[..., :2]
+
+    if img.ndim == 4:
+        # (Z, C, H, W) → max-projection, erste 2 Kanäle
+        return img[:, :2].max(axis=0).transpose(1, 2, 0)
 
     return img
 
@@ -63,13 +89,12 @@ def get_channel_names(image_path):
             return []
 
         root = ET.fromstring(ome)
-
+        ns = root.tag.split("}")[0] + "}" if "}" in root.tag else ""
         channels = []
 
         for ch in root.iter():
-            if "Channel" in ch.tag:
-                name = ch.attrib.get("Name")
-                if name:
-                    channels.append(name)
+            name = ch.attrib.get("Name") or ch.attrib.get("ID", "")                
+            if name:     
+                channels.append(name)
 
         return channels

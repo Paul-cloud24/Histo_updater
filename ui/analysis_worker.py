@@ -7,9 +7,10 @@ class WorkerSignals(QObject):
     progress_tile   = pyqtSignal(int)
     finished        = pyqtSignal(str)
 class Sox9Worker(QRunnable):
-    def __init__(self, folder):
+    def __init__(self, folder, threshold= 10000):
         super().__init__()
         self.folder = folder
+        self.threshold = threshold
         self.signals = WorkerSignals()
         self.current_tile = 0
         self.total_tiles = 1
@@ -30,7 +31,10 @@ class Sox9Worker(QRunnable):
         if total_images == 0:
             self.signals.finished.emit("Keine geeigneten Bilder gefunden.")
             return
-        pipeline = Sox9Pipeline(worker=self)
+        
+        results_folder = os.path.join(self.folder, "results")
+        pipeline = Sox9Pipeline(worker=self, threshold=self.threshold)
+
         for idx, img_path in enumerate(images):
             # GLOBALER FORTSCHRITT
             progress_global = int((idx / total_images) * 100)
@@ -44,4 +48,6 @@ class Sox9Worker(QRunnable):
             self.signals.progress_tile.emit(100)
         self.signals.progress_global.emit(100)
         self.signals.progress_tile.emit(100)
-        self.signals.finished.emit("Sox9 Analyse erfolgreich abgeschlossen.")
+        self.signals.finished.emit(
+            f"Analyse abgeschlossen.\nErgebnisse gespeichert in:\n{results_folder}"
+        )

@@ -21,6 +21,8 @@ from skimage.morphology import remove_small_objects
 from PIL import Image, ImageDraw
 
 from .hardware_profile import evaluate_hardware
+from .roi import compute_roi_mask, apply_roi, save_roi_preview
+from ui.roi_dialog import ROIDialog
 
 
 # ── Diese beiden Funktionen aus deiner alten Pipeline übernehmen ─────
@@ -57,29 +59,73 @@ def classify_image(image_path):
         return "unknown"
 
 
-def find_images_in_folder(folder):
+def find_images_in_folder(folder: str):
     sox9_path = None
     dapi_path = None
-    for f in os.listdir(folder):
-        if not f.lower().endswith((".tif", ".tiff", ".png", ".jpg", ".jpeg")):
+    overlay_path = None  # c1-2.tif
+
+    for f in sorted(os.listdir(folder)):
+        if not f.lower().endswith((".tif", ".tiff")):
             continue
-        full = os.path.join(folder, f)
-        if not os.path.isfile(full):
+        if f.startswith("._"):   # macOS-Verstecktdateien
             continue
-        kind = classify_image(full)
-        print(f"  {f} → {kind}")
+        path = os.path.join(folder, f)
+        kind = classify_image(path)
         if kind == "sox9" and sox9_path is None:
-            sox9_path = full
+            sox9_path = path
         elif kind == "dapi" and dapi_path is None:
-            dapi_path = full
+            dapi_path = path
+        elif kind == "gray" and overlay_path is None:
+            overlay_path = path
+
+    # Fallback: nur c1-2.tif vorhanden → R=Sox9, B=DAPI direkt extrahieren
+    if (sox9_path is None or dapi_path is None) and overlay_path is not None:
+        print(f"  Fallback: extrahiere Kanäle aus {os.path.basename(overlay_path)}")
+        sox9_path, dapi_path = _split_overlay_channels(overlay_path, folder)
+
+    if sox9_path is None or dapi_path is None:
+        raise ValueError(
+            f"Unvollständiger Ordner '{os.path.basename(folder)}': "
+            f"sox9={'✔' if sox9_path else '✗'}  "
+            f"dapi={'✔' if dapi_path else '✗'} → wird übersprungen."
+        )
     return sox9_path, dapi_path
 
+
+def _split_overlay_channels(overlay_path: str, folder: str):
+    """
+    Extrahiert R- und B-Kanal aus einem RGB-Overlay-TIFF
+    und speichert sie als temporäre Einzelkanal-TIFs.
+    """
+    from PIL import Image as PilImage
+    import numpy as np
+
+    base    = os.path.splitext(os.path.basename(overlay_path))[0]
+    img     = np.array(PilImage.open(overlay_path))
+
+    if img.ndim != 3 or img.shape[2] < 3:
+        raise ValueError(f"Overlay {overlay_path} ist kein RGB-Bild")
+
+    sox9_arr = img[..., 0]   # R-Kanal = Sox9
+    dapi_arr = img[..., 2]   # B-Kanal = DAPI
+
+    # Als temp-TIF speichern (im selben Ordner, Prefix "extracted_")
+    sox9_out = os.path.join(folder, f"extracted_{base}_sox9.tif")
+    dapi_out = os.path.join(folder, f"extracted_{base}_dapi.tif")
+
+    PilImage.fromarray(sox9_arr).save(sox9_out)
+    PilImage.fromarray(dapi_arr).save(dapi_out)
+
+    print(f"  → Sox9-Kanal: {os.path.basename(sox9_out)}")
+    print(f"  → DAPI-Kanal:  {os.path.basename(dapi_out)}")
+
+    return sox9_out, dapi_out
 class Sox9Pipeline:
 
-    def __init__(self, worker=None, threshold=10000,
-                 min_nucleus_area=50, positive_fraction=0.10, nucleus_diameter=60, use_cellpose=False):
+    def __init__(self, worker=None, threshold = 60,roi_mask=None,
+                 min_nucleus_area=40, positive_fraction=0.10, nucleus_diameter=10, use_cellpose=False):
         self.worker           = worker
-        self.threshold        = threshold
+        self.threshold        = min(int(threshold),255)
         self.min_nucleus_area = min_nucleus_area
         self.positive_fraction = positive_fraction
         self.nucleus_diameter = nucleus_diameter
@@ -89,6 +135,8 @@ class Sox9Pipeline:
         self.tile_overlap = 32
         self.current_tile = 0
         self.total_tiles  = 0
+
+        self.roi_mask = roi_mask 
 
         self.hw = evaluate_hardware()
         torch.set_num_threads(self.hw["torch_threads"])
@@ -168,16 +216,25 @@ class Sox9Pipeline:
         step = self.tile_size - self.tile_overlap
 
         # ── 1) Percentile-Normierung ─────────────────────────────────────
-        p1  = np.percentile(channel_img, 1)
-        p99 = np.percentile(channel_img, 99)
-        norm = np.clip((channel_img - p1) / max(p99 - p1, 1) * 255, 0, 255)
-        print(f"{label_prefix} | Normierung p1={p1:.0f} p99={p99:.0f} "
-            f"→ norm mean={norm.mean():.1f}")
+        nonzero = channel_img[channel_img > 0]
+
+        if len(nonzero) == 0:
+            print(f"{label_prefix } | Warnung: Alle Pixel sind 0 → keine Segmentierung möglich")
+            return np.zeros_like(channel_img, dtype=np.int32)
+        
+        p1  = np.percentile(nonzero, 1)
+        p99 = np.percentile(nonzero, 99)
+        print(f"{label_prefix} | Normierung p1={p1:.0f} p99={p99:.0f} → "
+          f"norm mean={nonzero.mean():.1f}")
+        
+        norm = np.clip((channel_img.astype(np.float32) - p1) / max(p99 - p1, 1), 0, 1)*255
 
         # 2) Threshold — Otsu als Untergrenze, aber mind. p95 des normierten Bildes
         #    verhindert dass große Gewebebereiche als Kerne erkannt werden
-        otsu = threshold_otsu(norm)
-        p95  = np.percentile(norm[norm > 0], 95)
+
+        norm_roi = norm[channel_img > 0]
+        otsu = threshold_otsu(norm_roi)
+        p95  = np.percentile(norm_roi, 95)
         thr  = max(otsu, p95 * 0.5)   # nimm den höheren der beiden
         thr  = min(thr, 130)           # aber nie über 130 (sonst zu wenig Kerne)
         binary = norm > thr
@@ -185,19 +242,28 @@ class Sox9Pipeline:
         print(f"{label_prefix} | Threshold={thr:.1f} → "
             f"{binary.sum():,} positive Pixel ({100*binary.mean():.2f}%)")
 
-        # 3) Größenfilter: nur echte Kern-Größen behalten (50–5000 px bei 10x)
+        # 3) Größenfilter: nur echte Kern-Größen behalten (30–500 px bei 10x)
         labeled_tmp = label(binary)
         sizes = np.bincount(labeled_tmp.ravel())
-        valid_labels = np.where((sizes >= 50) & (sizes <= 5000))[0]
+        valid_labels = np.where((sizes >= 30) & (sizes <= 500))[0]
         binary_clean = np.isin(labeled_tmp, valid_labels)
 
         n_removed = labeled_tmp.max() - len(valid_labels)
-        print(f"{label_prefix} | Größenfilter (50–5000px): "
+        print(f"{label_prefix} | Größenfilter (30–500px): "
             f"{len(valid_labels)} behalten, {n_removed} entfernt")
-        
+        from analysis.auto_params import estimate_nucleus_params
+
+        # Parameter automatisch schätzen
+        params = estimate_nucleus_params(channel_img)
+        min_distance = params["min_distance"]
+        min_size     = params["min_size"]
+        max_size     = params["max_size"]
+
+        # Größenfilter mit auto-Werten
+        valid_labels = np.where((sizes >= min_size) & (sizes <= max_size))[0]
         # ── 4) Watershed zum Trennen überlappender Kerne ─────────────────
         dist    = distance_transform_edt(binary)
-        coords  = peak_local_max(dist, min_distance=8, labels=binary)
+        coords  = peak_local_max(dist, min_distance=min_distance, labels=binary_clean)
         seeds   = np.zeros(dist.shape, dtype=bool)
         seeds[tuple(coords.T)] = True
         markers = label(seeds)
@@ -316,8 +382,10 @@ class Sox9Pipeline:
     # ── Haupt-Entry-Point ────────────────────────────────────────────
 
     def run(self, sox9_path, dapi_path, output_folder):
-        base           = os.path.splitext(os.path.basename(sox9_path))[0]
-        results_folder = os.path.join(output_folder, "results")
+        folder_name = os.path.basename(os.path.dirname(sox9_path))
+        base        = folder_name   
+
+        results_folder = output_folder   
         os.makedirs(results_folder, exist_ok=True)
 
         print(f"\n── Analyse: {base} ──")
@@ -328,23 +396,39 @@ class Sox9Pipeline:
         sox9_img = self._load_channel(sox9_path)
         dapi_img = self._load_channel(dapi_path)
 
-        # 2) Cellpose nur auf DAPI
-        print("DAPI Segmentierung (Cellpose 2.2)...")
-        dapi_masks = self._segment(dapi_img, label_prefix="DAPI")
-        n_dapi_total   = int(dapi_masks.max())
-        print(f"  → {n_dapi_total} Kerne gefunden")
+        # 2) ROI zuerst berechnen
+        roi_mask = ROIDialog.load_roi_mask(dapi_path, h=dapi_img.shape[0], w=dapi_img.shape[1])
+        if roi_mask is None:
+            roi_mask = np.ones(dapi_img.shape, dtype=bool)  # kein ROI = ganzes Bild
 
-        if n_dapi_total == 0:
-            print("  Keine Kerne gefunden, Analyse abgebrochen.")
-            return {"n_dapi_total": 0, "n_positive": 0}
+        save_roi_preview(sox9_img, roi_mask,
+                     os.path.join(results_folder, f"{base}_roi.png"))
+        print(f"ROI: {roi_mask.sum():,} px ({100*roi_mask.mean():.1f}% des Bildes)")
 
-        # 3) Sox9-Intensität in DAPI-Kernen messen
+        # 3) Beide Bilder auf ROI zuschneiden — BEVOR Segmentierung läuft
+        dapi_roi = dapi_img.copy()
+        sox9_roi = sox9_img.copy()
+        dapi_roi[~roi_mask] = 0   # außerhalb ROI = schwarz → Cellpose/Watershed ignoriert das
+        sox9_roi[~roi_mask] = 0
+
+        # 4) Segmentierung NUR auf ROI-Daten
+        print("DAPI Segmentierung (nur ROI)...")
+        dapi_masks = self._segment(dapi_roi, label_prefix="DAPI")
+        n_nuclei   = int(dapi_masks.max())
+        print(f"  → {n_nuclei} Kerne in ROI gefunden")
+
+        if n_nuclei == 0:
+            self.signals.finished("Keine Kerne in der ROI gefunden.")
+            return
+        
+        # 5) Sox9-Intensität in DAPI-Kernen messen
         print("Sox9-Intensität messen...")
         df = self._measure_sox9_in_dapi_nuclei(dapi_masks, sox9_img,
                                             positive_fraction=self.positive_fraction)
         df["sox9_positive"] = df["positive_pixel_fraction"] >= self.positive_fraction
 
         n_sox9_pos  = int(df["sox9_positive"].sum())
+        n_dapi_total = int(dapi_masks.max())
         n_measured  = len(df)   # nach min_nucleus_area Filter
         ratio       = n_sox9_pos / max(1, n_dapi_total) * 100
 

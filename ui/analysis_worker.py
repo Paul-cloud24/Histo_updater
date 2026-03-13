@@ -1,15 +1,18 @@
 import os
 import time
 from PyQt5.QtCore import QObject, pyqtSignal, QRunnable
-from analysis.sox9_pipeline import Sox9Pipeline
+from sklearn import pipeline
+from analysis.sox9_pipeline import Sox9Pipeline, find_images_in_folder
+
 class WorkerSignals(QObject):
     progress_global = pyqtSignal(int)
     progress_tile   = pyqtSignal(int)
     finished        = pyqtSignal(str)
 class Sox9Worker(QRunnable):
-    def __init__(self, folder):
+    def __init__(self, folder, threshold= 10000):
         super().__init__()
         self.folder = folder
+        self.threshold = threshold
         self.signals = WorkerSignals()
         self.current_tile = 0
         self.total_tiles = 1
@@ -20,28 +23,28 @@ class Sox9Worker(QRunnable):
             percent = min(percent, 100)
             self.signals.progress_tile.emit(percent)
     def run(self):
-        print("Sox9 Worker gestartet")
-        images = [
-            os.path.join(self.folder, f)
-            for f in os.listdir(self.folder)
-            if f.lower().endswith((".tif", ".tiff", ".png", ".jpg", ".jpeg"))
-        ]
-        total_images = len(images)
-        if total_images == 0:
-            self.signals.finished.emit("Keine geeigneten Bilder gefunden.")
+        sox9_path, dapi_path = find_images_in_folder(self.folder)
+
+        if sox9_path is None:
+            self.signals.finished.emit("Kein Sox9-Bild gefunden.")
             return
-        pipeline = Sox9Pipeline(worker=self)
-        for idx, img_path in enumerate(images):
-            # GLOBALER FORTSCHRITT
-            progress_global = int((idx / total_images) * 100)
-            self.signals.progress_global.emit(progress_global)
-            # Reset Tile Fortschritt
-            self.current_tile = 0
-            self.total_tiles = 1
-            self.signals.progress_tile.emit(0)
-            print(f"Analysiere Bild: {os.path.basename(img_path)}")
-            pipeline.run(img_path, output_folder=self.folder)
-            self.signals.progress_tile.emit(100)
+        if dapi_path is None:
+            self.signals.finished.emit("Kein DAPI-Bild gefunden.")
+            return
+
+        self.signals.progress_global.emit(10)
+
+        pipeline = Sox9Pipeline(worker=self, threshold=self.threshold, nucleus_diameter=60, positive_fraction=0.10)
+        result = pipeline.run(sox9_path, dapi_path,
+                           output_folder=self.folder)
+
         self.signals.progress_global.emit(100)
         self.signals.progress_tile.emit(100)
-        self.signals.finished.emit("Sox9 Analyse erfolgreich abgeschlossen.")
+        self.signals.finished.emit(
+            f"Analyse abgeschlossen.\n\n"
+            f"DAPI-Kerne gesamt:     {result['n_dapi_total']}\n"
+            f"Sox9-positiv:          {result['n_positive']}\n"
+            f"──────────────────────\n"
+            f"Sox9+/DAPI-Ratio:      {result['ratio']:.1f} %\n\n"
+            f"Ergebnisse in: {self.folder}/results/"
+        )

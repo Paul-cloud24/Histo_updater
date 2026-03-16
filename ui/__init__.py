@@ -1,1 +1,1 @@
-from PyQt5.QtWidgets import QProgressBar
+from PySide6.QtWidgets import QProgressBar

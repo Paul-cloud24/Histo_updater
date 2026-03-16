@@ -9,12 +9,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
-from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLabel, QSlider, QSizePolicy
+from PySide6.QtCore import Qt, QThreadPool, QRunnable, QObject, Signal, QWaitCondition, QMutex
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QSizePolicy
 )
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QPixmap, QImage
+from PySide6.QtGui import QPixmap, QImage
+
 from PIL import Image
 from tifffile import imread
 

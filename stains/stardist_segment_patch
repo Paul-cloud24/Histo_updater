@@ -1,0 +1,69 @@
+# Änderung in analysis/sox9_pipeline.py
+# 
+# 1) __init__() — use_stardist Parameter hinzufügen:
+
+def __init__(self, worker=None, threshold=60, roi_mask=None,
+             min_nucleus_area=40, positive_fraction=0.10,
+             nucleus_diameter=10, use_cellpose=False,
+             use_stardist=True):        # ← neu, True = StarDist als Default
+    ...
+    self.use_stardist = use_stardist
+    self.use_cellpose = use_cellpose
+    ...
+    # Modell laden
+    if use_stardist:
+        try:
+            from stardist.models import StarDist2D
+            print("Lade StarDist Modell '2D_versatile_fluo'...")
+            self.stardist_model = StarDist2D.from_pretrained("2D_versatile_fluo")
+            print("StarDist geladen ✔")
+        except ImportError:
+            print("⚠ StarDist nicht installiert → Fallback: Watershed")
+            self.stardist_model = None
+            self.use_stardist   = False
+    else:
+        self.stardist_model = None
+
+
+# 2) _segment() — StarDist-Zweig einbauen:
+
+def _segment(self, channel_img, label_prefix=""):
+
+    # ── StarDist-Zweig ────────────────────────────────────────────
+    if self.use_stardist and self.stardist_model is not None:
+        return self._segment_stardist(channel_img, label_prefix)
+
+    # ── Watershed-Zweig (bisheriger Code, bleibt unverändert) ─────
+    # ... (dein bestehender _segment Code) ...
+
+
+# 3) Neue Methode _segment_stardist() hinzufügen:
+
+def _segment_stardist(self, channel_img, label_prefix=""):
+    """Segmentierung mit StarDist 2D_versatile_fluo."""
+    from csbdeep.utils import normalize
+
+    # Nur ROI-Pixel normieren
+    nonzero = channel_img[channel_img > 0]
+    if len(nonzero) < 100:
+        print(f"{label_prefix} | Kein Signal → leere Maske")
+        return np.zeros_like(channel_img, dtype=np.int32)
+
+    # StarDist erwartet normiertes Float-Bild
+    # normalize() aus csbdeep macht percentile-normierung
+    img_norm = normalize(channel_img.astype(np.float32), 1, 99.8)
+
+    # Schwarze ROI-Pixel (=0 im Original) auch nach Normierung auf 0 setzen
+    img_norm[channel_img == 0] = 0
+
+    masks, _ = self.stardist_model.predict_instances(img_norm)
+    masks    = masks.astype(np.int32)
+
+    n = masks.max()
+    print(f"{label_prefix} | StarDist: {n} Kerne segmentiert")
+
+    if self.worker:
+        self.worker.current_tile = 1
+        self.worker.total_tiles  = 1
+
+    return masks

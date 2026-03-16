@@ -1,30 +1,30 @@
-from models.architectures.backbone import HistologyBackbone
-from inference.infer_single import SingleStainInference
-import os
+# stains/base_stain.py
+from abc import ABC, abstractmethod
+import numpy as np
 
-class BaseStain:
-    def __init__(self, name, num_classes=2, tile_size=256, normalize=False):
-        self.name = name
-        self.num_classes = num_classes
-        self.tile_size = tile_size
-        self.normalize = normalize
+class BaseStain(ABC):
+    name         : str  = "Unbekannt"
+    version      : str  = "0.1"
+    method       : str  = "rule_based"
+    channels     : list = ["dapi"]
+    output_cols  : list = ["n_total", "n_positive", "n_negative", "ratio_%"]
 
-    def create_model(self):
-        return HistologyBackbone(num_classes=self.num_classes)
+    @abstractmethod
+    def analyze(self, sox9_path, dapi_path, output_folder,
+                roi_mask=None, threshold=None, **kwargs) -> dict:
+        raise NotImplementedError
 
-    def paths(self):
-        base = f"data/{self.name}"
-        return {
-            "raw": f"{base}/raw",
-            "tiles": f"{base}/tiles",
-            "preprocessed": f"{base}/preprocessed",
-            "labels": f"{base}/labels.csv",
-            "save_model": f"models/trained/{self.name}.pth",
-            "onnx_model": f"models/onnx/{self.name}.onnx",
-        }
+    def get_threshold_dialog(self, folder, parent=None):
+        return None
 
-    def load_for_inference(self):
-        model_path = f"models/trained/{self.name}.pth"
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Missing model: {model_path}")
-        return SingleStainInference(model_path, num_classes=self.num_classes)
+    def get_roi_dialog(self, dapi_path, parent=None):
+        return None
+
+    def supports_iso_calibration(self):
+        return False
+
+    def compute_threshold_from_iso(self, iso_folder, roi_mask=None):
+        raise NotImplementedError
+
+    def __repr__(self):
+        return f"<{self.__class__.__name__} method={self.method} v={self.version}>"

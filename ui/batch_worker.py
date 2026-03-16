@@ -6,16 +6,15 @@ from PIL import Image
 import numpy as np
 import os
 import traceback
-from PyQt5.QtCore import QRunnable, QObject, pyqtSignal, QWaitCondition, QMutex
-
+from PySide6.QtCore import Qt, QThreadPool, QRunnable, QObject, Signal, QWaitCondition, QMutex
 
 class BatchSignals(QObject):
-    progress        = pyqtSignal(int)         # 0–100 Gesamtfortschritt
-    folder_done     = pyqtSignal(str, dict)   # folder_name, result
-    folder_error    = pyqtSignal(str, str)    # folder_name, error
-    finished        = pyqtSignal(str, str)    # csv_path, plot_path
-    log             = pyqtSignal(str)         # Terminal-Log
-    roi_needed      = pyqtSignal(str, str)    # folder_name, dapi_path → UI öffnet Dialog
+    progress        = Signal(int)         # 0–100 Gesamtfortschritt
+    folder_done     = Signal(str, dict)   # folder_name, result
+    folder_error    = Signal(str, str)    # folder_name, error
+    finished        = Signal(str, str)    # csv_path, plot_path
+    log             = Signal(str)         # Terminal-Log
+    roi_needed      = Signal(str, str)    # folder_name, dapi_path → UI öffnet Dialog
 
 
 class BatchWorker(QRunnable):

@@ -1,277 +1,486 @@
+# ui/app.py — PySide6, Dark Theme (Catppuccin Mocha)
+
 import os
+import sys
 import random
 import numpy as np
-from PyQt5.QtWidgets import (
-    QApplication, QWidget, QPushButton, QLabel, QVBoxLayout,
-    QHBoxLayout, QFileDialog, QComboBox, QMessageBox,
-    QProgressBar, QSlider, QGroupBox,QDialog
-)
-from PyQt5.QtCore import Qt, QThreadPool
-from PyQt5.QtGui import QPixmap, QImage
-import matplotlib
-from torch import layout
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import io
-from PIL import Image
 
-from stains import col1, col2, safranin_o, tunel
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QMainWindow, QVBoxLayout, QHBoxLayout,
+    QPushButton, QLabel, QProgressBar, QTextEdit, QGroupBox,
+    QComboBox, QStatusBar, QFileDialog, QFrame, QDialog, QMessageBox,
+    QSizePolicy
+)
+from PySide6.QtCore import Qt, QThreadPool
+from PySide6.QtGui import QFont, QTextCursor
+
+from stains import available_stains, get_stain
 from ui.analysis_worker import Sox9Worker
-from ui.dl_worker import DLWorker
-from analysis.channel_detection import extract_channels
+from ui.batch_worker import BatchWorker
 from ui.threshold_dialog import ThresholdDialog
 from ui.roi_dialog import ROIDialog
+from analysis.sox9_pipeline import find_images_in_folder
+from analysis.batch_runner import find_sox9_folders
 
-STAIN_MAP = {
-    "Col1": col1.get_model,
-    "Col2": col2.get_model,
-    "Safranin O": safranin_o.get_model,
-    "TUNEL": tunel.get_model,
+# ── Stylesheet ────────────────────────────────────────────────────────
+STYLESHEET = """
+* {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    font-size: 13px;
 }
+QMainWindow, QWidget {
+    background-color: #1e1e2e;
+    color: #cdd6f4;
+}
+QGroupBox {
+    border: 1px solid #313244;
+    border-radius: 8px;
+    margin-top: 14px;
+    padding: 10px 8px 8px 8px;
+    font-weight: 600;
+    color: #89b4fa;
+    font-size: 12px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 6px;
+}
+QPushButton {
+    background-color: #313244;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    border-radius: 6px;
+    padding: 7px 14px;
+    text-align: left;
+}
+QPushButton:hover {
+    background-color: #45475a;
+    border-color: #89b4fa;
+    color: #ffffff;
+}
+QPushButton:pressed {
+    background-color: #585b70;
+}
+QPushButton:disabled {
+    background-color: #1e1e2e;
+    color: #45475a;
+    border-color: #313244;
+}
+QPushButton#primary {
+    background-color: #89b4fa;
+    color: #1e1e2e;
+    font-weight: 700;
+    font-size: 14px;
+    border: none;
+    text-align: center;
+    border-radius: 8px;
+}
+QPushButton#primary:hover {
+    background-color: #b4befe;
+}
+QPushButton#primary:disabled {
+    background-color: #313244;
+    color: #585b70;
+}
+QPushButton#success {
+    background-color: #a6e3a1;
+    color: #1e1e2e;
+    font-weight: 600;
+    border: none;
+    text-align: left;
+}
+QPushButton#success:hover {
+    background-color: #94e2d5;
+}
+QPushButton#warning {
+    background-color: #fab387;
+    color: #1e1e2e;
+    font-weight: 600;
+    border: none;
+    text-align: left;
+}
+QComboBox {
+    background-color: #313244;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    border-radius: 6px;
+    padding: 6px 10px;
+    min-height: 28px;
+}
+QComboBox:hover { border-color: #89b4fa; }
+QComboBox::drop-down { border: none; width: 20px; }
+QComboBox QAbstractItemView {
+    background-color: #313244;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    selection-background-color: #45475a;
+    outline: none;
+}
+QProgressBar {
+    background-color: #313244;
+    border: none;
+    border-radius: 4px;
+    max-height: 6px;
+    text-align: center;
+    color: transparent;
+}
+QProgressBar::chunk {
+    background-color: #89b4fa;
+    border-radius: 4px;
+}
+QProgressBar#tile_bar::chunk {
+    background-color: #a6e3a1;
+}
+QTextEdit {
+    background-color: #11111b;
+    color: #cdd6f4;
+    border: 1px solid #313244;
+    border-radius: 6px;
+    font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
+    font-size: 12px;
+    padding: 6px;
+    selection-background-color: #45475a;
+}
+QStatusBar {
+    background-color: #181825;
+    color: #6c7086;
+    font-size: 11px;
+    border-top: 1px solid #313244;
+    padding: 2px 8px;
+}
+QLabel#header {
+    font-size: 20px;
+    font-weight: 700;
+    color: #cdd6f4;
+    letter-spacing: 1px;
+}
+QLabel#subheader {
+    font-size: 11px;
+    color: #6c7086;
+    letter-spacing: 2px;
+}
+QLabel#section {
+    font-size: 11px;
+    font-weight: 600;
+    color: #6c7086;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+QLabel#info {
+    color: #a6adc8;
+    font-size: 12px;
+}
+QFrame#separator {
+    background-color: #313244;
+    max-height: 1px;
+    border: none;
+}
+QFrame#sidebar {
+    background-color: #181825;
+    border-right: 1px solid #313244;
+}
+"""
 
 
-class HistologyUI(QWidget):
+class HistologyUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.threadpool = QThreadPool()
-        self.threshold = 60
+        self.threadpool        = QThreadPool()
         self.confirmed_threshold = 60
-        self.current_preview_path = None
+        self.folder            = None
+        self._use_roi          = False
+        self._roi_points       = None
+        self._batch_worker     = None
 
-        self.setWindowTitle("Histology Analysis – UI")
-        self.setGeometry(200, 200, 700, 850)
+        self.setWindowTitle("Histo Analyzer")
+        self.setMinimumSize(960, 680)
 
-        layout = QVBoxLayout()
+        # Statusleiste
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        self._set_status("Bereit", "idle")
 
-        # ── Stain selection ──────────────────────────────────────────
-        stain_group = QGroupBox("Färbung")
-        stain_layout = QVBoxLayout()
+        # Hauptlayout
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QHBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Sidebar ───────────────────────────────────────────────────
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(270)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(16, 20, 16, 16)
+        sidebar_layout.setSpacing(4)
+
+        # Logo
+        lbl_logo = QLabel("🔬 HISTO")
+        lbl_logo.setObjectName("header")
+        lbl_sub  = QLabel("ANALYZER  ·  v2.0")
+        lbl_sub.setObjectName("subheader")
+        sidebar_layout.addWidget(lbl_logo)
+        sidebar_layout.addWidget(lbl_sub)
+        sidebar_layout.addSpacing(16)
+        sidebar_layout.addWidget(self._separator())
+
+        # Färbung
+        sidebar_layout.addSpacing(12)
+        sidebar_layout.addWidget(self._section_label("Färbung"))
         self.stain_box = QComboBox()
-        self.stain_box.addItems(list(STAIN_MAP.keys()))
-        stain_layout.addWidget(QLabel("Färbung auswählen:"))
-        stain_layout.addWidget(self.stain_box)
-        stain_group.setLayout(stain_layout)
-        layout.addWidget(stain_group)
+        self.stain_box.addItems(available_stains())
+        self.stain_box.currentTextChanged.connect(self._on_stain_changed)
+        sidebar_layout.addWidget(self.stain_box)
 
-        # ── Folder selection ─────────────────────────────────────────
-        folder_group = QGroupBox("Ordner")
-        folder_layout = QVBoxLayout()
-        self.folder_label = QLabel("Kein Ordner ausgewählt")
-        self.folder_btn = QPushButton("Ordner auswählen")
-        self.folder_btn.clicked.connect(self.select_folder)
-        folder_layout.addWidget(self.folder_btn)
-        folder_layout.addWidget(self.folder_label)
-        folder_group.setLayout(folder_layout)
-        layout.addWidget(folder_group)
+        # Ordner
+        sidebar_layout.addSpacing(12)
+        sidebar_layout.addWidget(self._section_label("Ordner"))
+        self.folder_label = QLabel("Kein Ordner gewählt")
+        self.folder_label.setObjectName("info")
+        self.folder_label.setWordWrap(True)
+        btn_folder = QPushButton("📁   Ordner wählen")
+        btn_folder.clicked.connect(self._select_folder)
+        sidebar_layout.addWidget(btn_folder)
+        sidebar_layout.addWidget(self.folder_label)
 
-        # ── DL Analysis ──────────────────────────────────────────────
-        self.start_btn = QPushButton("DL‑Analyse starten")
-        self.start_btn.clicked.connect(self.start_analysis)
-        layout.addWidget(self.start_btn)
+        # Einstellungen
+        sidebar_layout.addSpacing(12)
+        sidebar_layout.addWidget(self._section_label("Einstellungen"))
 
-        self.threshold_btn = QPushButton("🔬 Threshold einstellen...")
-        self.threshold_btn.clicked.connect(self.open_threshold_dialog)
-        layout.addWidget(self.threshold_btn)
+        self.btn_threshold = QPushButton("🔬   Threshold einstellen...")
+        self.btn_threshold.clicked.connect(self._open_threshold_dialog)
+        self.threshold_info = QLabel(f"Threshold: {self.confirmed_threshold}")
+        self.threshold_info.setObjectName("info")
 
-        self.btn_roi = QPushButton("📐 ROI einzeichnen...")
+        self.btn_roi = QPushButton("📐   ROI einzeichnen...")
         self.btn_roi.clicked.connect(self._open_roi_dialog)
-        layout.addWidget(self.btn_roi)  
-        self._use_roi = False   # Startzustand: ganzes Bild
 
-        self.btn_roi_mode = QPushButton("🔍 Modus: Ganzes Bild")
-        self.btn_roi_mode.setStyleSheet("color: gray;")
+        self.btn_roi_mode = QPushButton("🔍   Modus: Ganzes Bild")
         self.btn_roi_mode.clicked.connect(self._toggle_roi_mode)
-        layout.addWidget(self.btn_roi_mode)
 
-        self.confirmed_label = QLabel(f"Threshold: {self.confirmed_threshold}")
-        self.confirmed_label.setStyleSheet("color: gray; font-size: 10px;")
-        layout.addWidget(self.confirmed_label)
+        for w in [self.btn_threshold, self.threshold_info,
+                  self.btn_roi, self.btn_roi_mode]:
+            sidebar_layout.addWidget(w)
 
-        # ── Sox9/DAPI Analysis ───────────────────────────────────────
-        self.sox9_btn = QPushButton("Sox9/DAPI Analyse starten")
-        self.sox9_btn.clicked.connect(self.run_sox9_analysis)
-        layout.addWidget(self.sox9_btn)
+        sidebar_layout.addStretch()
+        sidebar_layout.addWidget(self._separator())
+        sidebar_layout.addSpacing(8)
 
-        # ── Progress Bars ────────────────────────────────────────────
-        layout.addWidget(QLabel("Gesamtfortschritt"))
+        # Analyse-Button
+        self.btn_analyze = QPushButton("▶   Analyse starten")
+        self.btn_analyze.setObjectName("primary")
+        self.btn_analyze.setMinimumHeight(44)
+        self.btn_analyze.clicked.connect(self._start_analysis)
+        sidebar_layout.addWidget(self.btn_analyze)
+
+        # ── Hauptbereich ──────────────────────────────────────────────
+        main_area = QWidget()
+        main_layout = QVBoxLayout(main_area)
+        main_layout.setContentsMargins(20, 20, 20, 16)
+        main_layout.setSpacing(12)
+
+        # Log
+        log_label = QLabel("Analyse-Log")
+        log_label.setObjectName("section")
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setPlaceholderText(
+            "Der Analyse-Log erscheint hier...\n\n"
+            "1. Ordner wählen\n"
+            "2. Färbung auswählen\n"
+            "3. Optional: Threshold und ROI einstellen\n"
+            "4. Analyse starten"
+        )
+        main_layout.addWidget(log_label)
+        main_layout.addWidget(self.log_view, stretch=1)
+
+        # Fortschritt
+        progress_group = QGroupBox("Fortschritt")
+        pg_layout = QVBoxLayout(progress_group)
+        pg_layout.setSpacing(6)
+
+        self.label_global = QLabel("Gesamt  0%")
+        self.label_global.setObjectName("info")
         self.progress_global = QProgressBar()
         self.progress_global.setValue(0)
-        layout.addWidget(self.progress_global)
 
-        layout.addWidget(QLabel("Aktuelles Bild (Tile‑Fortschritt)"))
+        self.label_current = QLabel("Aktueller Schritt  0%")
+        self.label_current.setObjectName("info")
         self.progress_current = QProgressBar()
+        self.progress_current.setObjectName("tile_bar")
         self.progress_current.setValue(0)
-        layout.addWidget(self.progress_current)
 
-        self.setLayout(layout)
-        self.folder = None
+        pg_layout.addWidget(self.label_global)
+        pg_layout.addWidget(self.progress_global)
+        pg_layout.addSpacing(4)
+        pg_layout.addWidget(self.label_current)
+        pg_layout.addWidget(self.progress_current)
+        main_layout.addWidget(progress_group)
 
-    # ── Folder ──────────────────────────────────────────────────────
-    def select_folder(self):
+        root.addWidget(sidebar)
+        root.addWidget(main_area, stretch=1)
+
+        # Initial Stain-abhängige Buttons
+        self._on_stain_changed(self.stain_box.currentText())
+
+    # ── Helpers ───────────────────────────────────────────────────────
+    def _separator(self):
+        f = QFrame()
+        f.setObjectName("separator")
+        f.setFrameShape(QFrame.HLine)
+        return f
+
+    def _section_label(self, text):
+        lbl = QLabel(text.upper())
+        lbl.setObjectName("section")
+        return lbl
+
+    def _set_status(self, msg, state="idle"):
+        colors = {
+            "idle":    "#6c7086",
+            "running": "#89b4fa",
+            "ok":      "#a6e3a1",
+            "error":   "#f38ba8",
+        }
+        color = colors.get(state, "#6c7086")
+        self.status_bar.setStyleSheet(
+            f"QStatusBar {{ background: #181825; color: {color}; "
+            f"font-size: 11px; border-top: 1px solid #313244; padding: 2px 8px; }}"
+        )
+        self.status_bar.showMessage(msg)
+
+    def _log(self, msg, color=None):
+        """Fügt eine Zeile zum Log hinzu, optional eingefärbt."""
+        cursor = self.log_view.textCursor()
+        cursor.movePosition(QTextCursor.End)
+
+        if "✔" in msg or "Fertig" in msg:
+            color = "#a6e3a1"
+        elif "✗" in msg or "Fehler" in msg or "Error" in msg:
+            color = "#f38ba8"
+        elif "⚠" in msg or "Warnung" in msg:
+            color = "#fab387"
+        elif msg.startswith("──"):
+            color = "#89b4fa"
+
+        if color:
+            self.log_view.append(
+                f'<span style="color:{color};">{msg}</span>'
+            )
+        else:
+            self.log_view.append(msg)
+
+        self.log_view.ensureCursorVisible()
+
+    # ── Ordner ────────────────────────────────────────────────────────
+    def _select_folder(self):
         path = QFileDialog.getExistingDirectory(self, "Ordner wählen")
         if path:
             self.folder = path
-            self.folder_label.setText(f"Ordner: {path}")
-            self.current_preview_path = None
+            short = os.path.basename(path)
+            self.folder_label.setText(f"📂 {short}")
+            self.folder_label.setToolTip(path)
+            self._set_status(f"Ordner: {short}", "idle")
 
-    def _toggle_roi_mode(self):
-        self._use_roi = not self._use_roi
-        if self._use_roi:
-            self.btn_roi_mode.setText("✂️ Modus: Mit ROI")
-            self.btn_roi_mode.setStyleSheet("color: green; font-weight: bold;")
-        else:
-            self.btn_roi_mode.setText("🔍 Modus: Ganzes Bild")
-            self.btn_roi_mode.setStyleSheet("color: gray;")   
-   
-    # ── Threshold ───────────────────────────────────────────────────
-    def open_threshold_dialog(self):
+    # ── Stain-abhängige UI ────────────────────────────────────────────
+    def _on_stain_changed(self, name):
+        is_sox9 = name == "Sox9/DAPI"
+        for w in [self.btn_threshold, self.threshold_info,
+                  self.btn_roi, self.btn_roi_mode]:
+            w.setVisible(is_sox9)
+
+    # ── Threshold ─────────────────────────────────────────────────────
+    def _open_threshold_dialog(self):
         if not self.folder:
-            QMessageBox.warning(self, "Fehler", "Bitte zuerst einen Ordner wählen.")
+            QMessageBox.warning(self, "Fehler", "Bitte zuerst Ordner wählen.")
             return
         dlg = ThresholdDialog(
             folder=self.folder,
             initial_threshold=self.confirmed_threshold,
             parent=self
         )
-        if dlg.exec_() == QDialog.Accepted:
+        if dlg.exec() == QDialog.Accepted:
             self.confirmed_threshold = dlg.confirmed_threshold
-            self.confirmed_label.setText(f"Threshold: {self.confirmed_threshold}")
-    
-    def threshold_changed(self):
-        self.threshold = self.threshold_slider.value()
-        self.threshold_label.setText(f"Threshold: {self.threshold}")
+            self.threshold_info.setText(f"Threshold: {self.confirmed_threshold}")
+            self._log(f"Threshold gesetzt: {self.confirmed_threshold}")
 
-    def confirm_threshold(self):
-        self.confirmed_threshold = self.threshold
-        self.confirmed_label.setText(f"Bestätigter Threshold: {self.confirmed_threshold}")
-        QMessageBox.information(
-            self, "Threshold gespeichert",
-            f"Threshold {self.confirmed_threshold} wurde gespeichert\nund wird für die Analyse verwendet."
-        )
-
+    # ── ROI ───────────────────────────────────────────────────────────
     def _open_roi_dialog(self):
-        dapi_path = self._current_dapi_path()   # wie du den DAPI-Pfad holst
+        dapi_path = self._find_dapi_path()
         if not dapi_path:
             return
         dlg = ROIDialog(dapi_path, parent=self)
         dlg.roi_confirmed.connect(self._on_roi_confirmed)
-        dlg.exec_()
+        dlg.exec()
 
-    def _current_dapi_path(self):
-        """Findet den DAPI-Pfad im aktuell gewählten Ordner."""
+    def _on_roi_confirmed(self, points):
+        self._roi_points = points
+        self.btn_roi.setText(f"📐   ROI ✓  ({len(points)} Punkte)")
+        self.btn_roi.setObjectName("success")
+        self.btn_roi.style().unpolish(self.btn_roi)
+        self.btn_roi.style().polish(self.btn_roi)
+        self._log(f"ROI gesetzt: {len(points)} Punkte")
+
+    def _toggle_roi_mode(self):
+        self._use_roi = not self._use_roi
+        if self._use_roi:
+            self.btn_roi_mode.setText("✂️   Modus: Mit ROI")
+            self.btn_roi_mode.setObjectName("success")
+        else:
+            self.btn_roi_mode.setText("🔍   Modus: Ganzes Bild")
+            self.btn_roi_mode.setObjectName("")
+        self.btn_roi_mode.style().unpolish(self.btn_roi_mode)
+        self.btn_roi_mode.style().polish(self.btn_roi_mode)
+
+    def _find_dapi_path(self):
         if not self.folder:
-            QMessageBox.warning(self, "Fehler", "Bitte zuerst einen Ordner wählen.")
+            QMessageBox.warning(self, "Fehler", "Bitte zuerst Ordner wählen.")
             return None
-
-        from analysis.sox9_pipeline import find_images_in_folder
         try:
-            sox9_path, dapi_path = find_images_in_folder(self.folder)
+            _, dapi_path = find_images_in_folder(self.folder)
             return dapi_path
-        except Exception as e:
-            QMessageBox.warning(self, "Fehler", f"Kein DAPI-Bild gefunden:\n{e}")
-            return None
+        except Exception:
+            # Unterordner probieren
+            folders = find_sox9_folders(self.folder)
+            if folders:
+                try:
+                    _, dapi_path = find_images_in_folder(folders[0])
+                    return dapi_path
+                except Exception:
+                    pass
+        QMessageBox.warning(self, "Fehler", "Kein DAPI-Bild gefunden.")
+        return None
 
-    def _on_roi_confirmed(self, points_normalized):
-        self._roi_points = points_normalized
-        self.btn_roi.setText(f"📐 ROI ✓ ({len(points_normalized)} Punkte)")
-        self.btn_roi.setStyleSheet("color: green; font-weight: bold;")
-    # ── Live Preview ─────────────────────────────────────────────────
-    def preview_threshold(self):
+    # ── Analyse ───────────────────────────────────────────────────────
+    def _start_analysis(self):
         if not self.folder:
             QMessageBox.warning(self, "Fehler", "Bitte Ordner wählen.")
             return
 
-        # Pick a random image (or reuse the last one)
-        if self.current_preview_path is None:
-            images = [
-                os.path.join(self.folder, f)
-                for f in os.listdir(self.folder)
-                if f.lower().endswith((".tif", ".tiff", ".png", ".jpg", ".jpeg"))
-            ]
-            if not images:
-                QMessageBox.warning(self, "Fehler", "Keine Bilder im Ordner.")
-                return
-            self.current_preview_path = random.choice(images)
-
-        try:
-            img = extract_channels(self.current_preview_path, "sox9_dapi")
-        except Exception as e:
-            QMessageBox.warning(self, "Ladefehler", str(e))
-            return
-
-        sox9 = img[..., 1].astype(np.float32)
-        norm = (sox9 / max(1, sox9.max()) * 255).astype(np.uint8)
-        mask = sox9 >= self.threshold
-
-        # Build RGB overlay
-        rgb = np.stack([norm, norm, norm], axis=-1)
-        rgb[mask, 0] = 255   # rot für positiv
-        rgb[mask, 1] = 0
-        rgb[mask, 2] = 0
-
-        # Render to QPixmap via matplotlib
-        fig, ax = plt.subplots(figsize=(5, 3), dpi=100)
-        ax.imshow(rgb)
-        ax.set_title(
-            f"Sox9-Kanal | Threshold={self.threshold} | "
-            f"Positiv: {mask.sum()} px",
-            fontsize=9
-        )
-        ax.axis("off")
-        plt.tight_layout(pad=0.2)
-
-        buf = io.BytesIO()
-        plt.savefig(buf, format="png")
-        plt.close(fig)
-        buf.seek(0)
-
-        pil = Image.open(buf)
-        data = pil.tobytes("raw", "RGB")
-        qimg = QImage(data, pil.width, pil.height, QImage.Format_RGB888)
-        self.preview_label.setPixmap(
-            QPixmap.fromImage(qimg).scaled(
-                self.preview_label.width(),
-                self.preview_label.height(),
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation,
-            )
-        )
-
-    # ── DL Analysis ─────────────────────────────────────────────────
-    def start_analysis(self):
-        if not self.folder:
-            QMessageBox.warning(self, "Fehler", "Bitte Ordner auswählen.")
-            return
         stain_name = self.stain_box.currentText()
-        stain_model = STAIN_MAP[stain_name]()
-        worker = DLWorker(self.folder, stain_model)
-        worker.signals.progress.connect(self.progress_global.setValue)
-        worker.signals.finished.connect(self.show_results)
-        self.threadpool.start(worker)
-        QMessageBox.information(self, "Analyse gestartet", "DL‑Analyse läuft...")
 
-    def show_results(self, text):
-        self.progress_global.setValue(100)
-        QMessageBox.information(self, "Ergebnisse", text)
-
-    # ── Sox9/DAPI Analysis ───────────────────────────────────────────
-    # Änderungen in ui/app.py
-# run_sox9_analysis() und Hilfsmethoden ersetzen/ergänzen
-
-    # ── Sox9/DAPI Batch-Analyse ──────────────────────────────────────
-    def run_sox9_analysis(self):
-        if not self.folder:
-            QMessageBox.warning(self, "Fehler", "Bitte Ordner wählen.")
+        # Nicht implementierte Färbungen abfangen
+        if stain_name != "Sox9/DAPI":
+            try:
+                stain = get_stain(stain_name)
+                stain.analyze(None, None, None)
+            except NotImplementedError as e:
+                QMessageBox.information(
+                    self, "In Entwicklung",
+                    f"'{stain_name}' ist noch nicht implementiert.\n\n"
+                    f"Aktuell verfügbar: Sox9/DAPI"
+                )
             return
 
-        from ui.batch_worker       import BatchWorker
-        from analysis.batch_runner import find_sox9_folders
+        self.run_sox9_analysis()
 
+    def run_sox9_analysis(self):
         folders = find_sox9_folders(self.folder)
 
         if not folders:
-            # Kein Unterordner → aktuellen Ordner direkt analysieren
-            self._run_single_folder(self.folder)
+            self._run_single()
             return
 
         reply = QMessageBox.question(
@@ -282,107 +491,83 @@ class HistologyUI(QWidget):
         if reply != QMessageBox.Yes:
             return
 
+        self._start_batch(folders)
+
+    def _run_single(self):
+        self.log_view.clear()
+        self._set_status("Analyse läuft...", "running")
+        self.btn_analyze.setEnabled(False)
+
+        worker = Sox9Worker(
+            folder=self.folder,
+            threshold=self.confirmed_threshold
+        )
+        worker.signals.progress_global.connect(self._on_global_progress)
+        worker.signals.progress_tile.connect(self._on_tile_progress)
+        worker.signals.finished.connect(self._on_single_finished)
+        self.threadpool.start(worker)
+
+    def _start_batch(self, folders):
+        self.log_view.clear()
         self.progress_global.setValue(0)
         self.progress_current.setValue(0)
-        self.sox9_btn.setEnabled(False)
+        self.btn_analyze.setEnabled(False)
+        self._set_status(f"Batch: {len(folders)} Ordner...", "running")
 
-        # Worker speichern damit roi_confirmed() erreichbar bleibt
         self._batch_worker = BatchWorker(
             root_folder=self.folder,
             threshold=self.confirmed_threshold,
             use_roi=self._use_roi,
         )
-        self._batch_worker.signals.progress.connect(
-            self.progress_global.setValue)
-        self._batch_worker.signals.log.connect(
-            self._on_batch_log)
-        self._batch_worker.signals.folder_done.connect(
-            self._on_folder_done)
-        self._batch_worker.signals.folder_error.connect(
-            self._on_folder_error)
-        self._batch_worker.signals.finished.connect(
-            self._on_batch_finished)
-
-        # ROI-Pause-Signal → im UI-Thread öffnet Dialog
-        self._batch_worker.signals.roi_needed.connect(
-            self._on_roi_needed)
-
+        self._batch_worker.signals.progress.connect(self._on_global_progress)
+        self._batch_worker.signals.log.connect(self._log)
+        self._batch_worker.signals.folder_done.connect(self._on_folder_done)
+        self._batch_worker.signals.folder_error.connect(self._on_folder_error)
+        self._batch_worker.signals.finished.connect(self._on_batch_finished)
         self.threadpool.start(self._batch_worker)
-        QMessageBox.information(
-            self, "Batch gestartet",
-            f"Analyse von {len(folders)} Ordner(n) läuft...\n"
-            "Bei fehlender ROI wird die Analyse pausiert."
-        )
 
-    def _run_single_folder(self, folder: str):
-        """Einzelordner analysieren (bisheriges Verhalten)."""
-        from ui.analysis_worker import Sox9Worker
-        worker = Sox9Worker(
-            folder=folder,
-            threshold=self.confirmed_threshold
-        )
-        worker.signals.progress_global.connect(self.progress_global.setValue)
-        worker.signals.progress_tile.connect(self.progress_current.setValue)
-        worker.signals.finished.connect(self.analysis_finished)
-        self.threadpool.start(worker)
-        QMessageBox.information(
-            self, "Analyse gestartet", "Sox9/DAPI Analyse läuft...")
+    # ── Callbacks ─────────────────────────────────────────────────────
+    def _on_global_progress(self, val):
+        self.progress_global.setValue(val)
+        self.label_global.setText(f"Gesamt  {val}%")
 
-    # ── ROI-Pause während Batch ──────────────────────────────────────
-    def _on_roi_needed(self, folder_name: str, dapi_path: str):
-        """
-        Wird im UI-Thread aufgerufen wenn ein Ordner keine ROI hat.
-        Öffnet ROI-Dialog, wartet auf Bestätigung, gibt Worker frei.
-        """
-        QMessageBox.information(
-            self, "ROI benötigt",
-            f"Für den Ordner\n'{folder_name}'\nwurde noch keine ROI definiert.\n\n"
-            "Bitte ROI einzeichnen und auf 'Übernehmen' klicken."
-        )
-        dlg = ROIDialog(dapi_path, parent=self)
+    def _on_tile_progress(self, val):
+        self.progress_current.setValue(val)
+        self.label_current.setText(f"Aktueller Schritt  {val}%")
 
-        def on_confirmed(pts):
-            # ROI gespeichert → Worker-Thread fortsetzen
-            self._batch_worker.roi_confirmed()
-
-        def on_rejected():
-            # Abgebrochen → Worker trotzdem fortsetzen (wird dann übersprungen)
-            self._batch_worker.roi_confirmed()
-
-        dlg.roi_confirmed.connect(on_confirmed)
-        dlg.rejected.connect(on_rejected)
-        dlg.exec_()   # blockiert UI-Thread bis Dialog geschlossen
-
-    # ── Batch-Callbacks ─────────────────────────────────────────────
-    def _on_batch_log(self, msg: str):
-        print(msg)
-
-    def _on_folder_done(self, folder_name: str, result: dict):
-        self.progress_current.setValue(100)
-
-    def _on_folder_error(self, folder_name: str, error: str):
-        print(f"✗ {folder_name}: {error}")
-
-    def _on_batch_finished(self, csv_path: str, plot_path: str):
-        self.sox9_btn.setEnabled(True)
+    def _on_single_finished(self, text):
+        self.btn_analyze.setEnabled(True)
         self.progress_global.setValue(100)
+        self._set_status("✔ Analyse abgeschlossen", "ok")
+        self._log(f"✔ {text}")
 
-        msg = "Batch-Analyse abgeschlossen!\n\n"
+    def _on_folder_done(self, name, result):
+        self.progress_current.setValue(100)
+        self._set_status(f"✔ {name}", "running")
+
+    def _on_folder_error(self, name, error):
+        self._log(f"✗ {name}: {error}")
+        self._set_status(f"✗ Fehler: {name}", "error")
+
+    def _on_batch_finished(self, csv_path, plot_path):
+        self.btn_analyze.setEnabled(True)
+        self.progress_global.setValue(100)
+        self._set_status("✔ Batch abgeschlossen", "ok")
+        self._log("── Batch-Analyse abgeschlossen ──")
         if csv_path:
-            msg += f"CSV:   {csv_path}\n"
+            self._log(f"✔ CSV:  {csv_path}")
         if plot_path:
-            msg += f"Plot:  {plot_path}\n"
-        msg += f"\nAlle Ergebnisse in:\n{self.folder}/Results/"
-        QMessageBox.information(self, "Fertig", msg)
-
-    def analysis_finished(self, text):
-        self.progress_global.setValue(100)
-        self.progress_current.setValue(100)
-        QMessageBox.information(self, "Analyse abgeschlossen", text)
+            self._log(f"✔ Plot: {plot_path}")
+        QMessageBox.information(
+            self, "Fertig",
+            f"Batch-Analyse abgeschlossen!\n\n"
+            f"Ergebnisse in:\n{self.folder}/Results/"
+        )
 
 
 def run_ui():
-    app = QApplication([])
+    app = QApplication(sys.argv)
+    app.setStyleSheet(STYLESHEET)
     ui = HistologyUI()
     ui.show()
-    app.exec_()
+    sys.exit(app.exec())

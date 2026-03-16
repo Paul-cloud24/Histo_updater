@@ -1,8 +1,8 @@
 import os
-from PyQt5.QtCore import QObject, pyqtSignal, QRunnable
+from PySide6.QtCore import Qt, QThreadPool, QRunnable, QObject, Signal, QWaitCondition, QMutex
 class DLWorkerSignals(QObject):
-    progress = pyqtSignal(int)     # 0–100%
-    finished = pyqtSignal(str)     # final result text
+    progress = Signal(int)     # 0–100%
+    finished = Signal(str)     # final result text
 class DLWorker(QRunnable):
     """
     Worker für klassische DL-Stain-Analyse.

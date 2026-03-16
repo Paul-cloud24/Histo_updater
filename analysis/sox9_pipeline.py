@@ -1,6 +1,7 @@
 # analysis/sox9_pipeline.py
 
 import os
+from cv2 import normalize
 import numpy as np
 import pandas as pd
 import torch
@@ -21,8 +22,7 @@ from skimage.morphology import remove_small_objects
 from PIL import Image, ImageDraw
 
 from .hardware_profile import evaluate_hardware
-from .roi import compute_roi_mask, apply_roi, save_roi_preview
-from ui.roi_dialog import ROIDialog
+
 
 
 # ── Diese beiden Funktionen aus deiner alten Pipeline übernehmen ─────
@@ -123,7 +123,7 @@ def _split_overlay_channels(overlay_path: str, folder: str):
 class Sox9Pipeline:
 
     def __init__(self, worker=None, threshold = 60,roi_mask=None,
-                 min_nucleus_area=40, positive_fraction=0.10, nucleus_diameter=10, use_cellpose=False):
+                 min_nucleus_area=40, positive_fraction=0.10, nucleus_diameter=10, use_cellpose=False, use_stardist=True):
         self.worker           = worker
         self.threshold        = min(int(threshold),255)
         self.min_nucleus_area = min_nucleus_area
@@ -140,6 +140,10 @@ class Sox9Pipeline:
 
         self.hw = evaluate_hardware()
         torch.set_num_threads(self.hw["torch_threads"])
+
+        self.use_stardist = use_stardist
+        self.stardist_model = None
+        self.model          = None   # Cellpose
 
         if use_cellpose:
             print("Lade Cellpose 2.2 Modell...")
@@ -212,6 +216,9 @@ class Sox9Pipeline:
         Percentile-Normierung → Otsu-Threshold → Watershed
         Das ist zuverlässiger als Cellpose bei sehr dunklem Hintergrund.
         """
+        if self.use_stardist and self.stardist_model is not None:
+            return self._segment_stardist(channel_img, label_prefix)
+        
         h, w = channel_img.shape
         step = self.tile_size - self.tile_overlap
 
@@ -271,6 +278,31 @@ class Sox9Pipeline:
 
         n = masks.max()
         print(f"{label_prefix} | {n} Kerne segmentiert")
+
+        if self.worker:
+            self.worker.current_tile = 1
+            self.worker.total_tiles  = 1
+
+        return masks
+
+    def _segment_stardist(self, channel_img, label_prefix=""):
+        """Segmentierung mit StarDist 2D_versatile_fluo."""
+        from csbdeep.utils import normalize
+
+        nonzero = channel_img[channel_img > 0]
+        if len(torch.nonzero(nonzero)) < 100:
+            print(f"{label_prefix} | Kein Signal → leere Maske")
+            return np.zeros_like(channel_img, dtype=np.int32)
+
+        # Normieren — nur ROI-Pixel berücksichtigen
+        img_norm = normalize(channel_img.astype(np.float32), 1, 99.8)
+        img_norm[channel_img == 0] = 0   # Hintergrund bleibt schwarz
+
+        masks, _ = self.stardist_model.predict_instances(img_norm)
+        masks    = masks.astype(np.int32)
+
+        n = masks.max()
+        print(f"{label_prefix} | StarDist: {n} Kerne segmentiert")
 
         if self.worker:
             self.worker.current_tile = 1
@@ -397,12 +429,10 @@ class Sox9Pipeline:
         dapi_img = self._load_channel(dapi_path)
 
         # 2) ROI zuerst berechnen
-        roi_mask = ROIDialog.load_roi_mask(dapi_path, h=dapi_img.shape[0], w=dapi_img.shape[1])
+        roi_mask = self.roi_mask if self.roi_mask is not None else np.ones(dapi_img.shape, dtype=bool)
         if roi_mask is None:
             roi_mask = np.ones(dapi_img.shape, dtype=bool)  # kein ROI = ganzes Bild
 
-        save_roi_preview(sox9_img, roi_mask,
-                     os.path.join(results_folder, f"{base}_roi.png"))
         print(f"ROI: {roi_mask.sum():,} px ({100*roi_mask.mean():.1f}% des Bildes)")
 
         # 3) Beide Bilder auf ROI zuschneiden — BEVOR Segmentierung läuft

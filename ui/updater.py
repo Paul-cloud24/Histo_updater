@@ -11,7 +11,7 @@ GITHUB_RAW = "https://raw.githubusercontent.com"
 
 
 class UpdateChecker(QObject):
-    update_available = Signal(str, str, list)  # (version, changelog, files)
+    update_available = Signal(str, str, list)
     up_to_date       = Signal()
     error            = Signal(str)
 
@@ -27,7 +27,10 @@ class UpdateChecker(QObject):
     def _check(self):
         try:
             url  = f"{GITHUB_RAW}/{self.update_repo}/main/version.json"
-            data = json.loads(self._fetch(url))
+            req  = urllib.request.Request(
+                url, headers={"User-Agent": "HistoAnalyzer"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read())
 
             latest    = data.get("version", "0.0.0")
             changelog = data.get("changelog", "")
@@ -41,12 +44,6 @@ class UpdateChecker(QObject):
         except Exception as e:
             self.error.emit(str(e))
 
-    def _fetch(self, url: str) -> bytes:
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "HistoAnalyzer"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            return resp.read()
-
     @staticmethod
     def _is_newer(latest: str, current: str) -> bool:
         def parse(v):
@@ -58,7 +55,7 @@ class UpdateChecker(QObject):
 
 
 class FileUpdater(QObject):
-    progress = Signal(int, str)   # (prozent, dateiname)
+    progress = Signal(int, str)
     done     = Signal()
     error    = Signal(str)
 
@@ -66,7 +63,7 @@ class FileUpdater(QObject):
         super().__init__()
         self.update_repo = update_repo
         self.files       = files
-        self.app_root    = app_root   # Verzeichnis wo main.py liegt
+        self.app_root    = app_root
 
     def run_async(self):
         t = threading.Thread(target=self._run, daemon=True)
@@ -76,18 +73,16 @@ class FileUpdater(QObject):
         try:
             n = len(self.files)
             for i, rel_path in enumerate(self.files):
-                self.progress.emit(
-                    int(i / n * 90),
-                    rel_path
-                )
-                url      = f"{GITHUB_RAW}/{self.update_repo}/main/{rel_path}"
-                req      = urllib.request.Request(
+                self.progress.emit(int(i / n * 90), rel_path)
+
+                url = f"{GITHUB_RAW}/{self.update_repo}/main/{rel_path}"
+                req = urllib.request.Request(
                     url, headers={"User-Agent": "HistoAnalyzer"})
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     content = resp.read()
 
-                # Lokal speichern
-                dest = os.path.join(self.app_root, rel_path.replace("/", os.sep))
+                dest = os.path.join(
+                    self.app_root, rel_path.replace("/", os.sep))
                 os.makedirs(os.path.dirname(dest), exist_ok=True)
                 with open(dest, "wb") as f:
                     f.write(content)
@@ -97,4 +92,3 @@ class FileUpdater(QObject):
 
         except Exception as e:
             self.error.emit(str(e))
-            

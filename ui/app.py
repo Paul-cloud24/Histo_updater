@@ -714,20 +714,23 @@ class HistologyUI(QMainWindow):
             from version import VERSION, UPDATE_REPO
             self._updater = UpdateChecker(VERSION, UPDATE_REPO)
             self._updater.update_available.connect(self._on_update_found)
-            self._updater.error.connect(lambda e: print(f"[Update] {e}"))
+            self._updater.error.connect(
+                lambda e: print(f"[Update] {e}"))
             self._updater.check_async()
         except Exception:
             pass
 
-    def _on_update_found(self, new_version: str, changelog: str, files: list):
+    def _on_update_found(self, new_version: str,
+                         changelog: str, files: list):
         self._update_data = (new_version, changelog, files)
         self.btn_update.setText(f"⬆  v{new_version} verfügbar!")
         self.btn_update.setVisible(True)
+        self._update_data = ("", "", [])
+        self._start_update_check()
 
     def _on_update_clicked(self):
         from ui.update_dialog import UpdateDialog
         from version import UPDATE_REPO
-        import os, sys
         app_root = os.path.dirname(os.path.abspath(sys.argv[0]))
         new_version, changelog, files = self._update_data
         dlg = UpdateDialog(
@@ -866,3 +869,6 @@ def run_ui():
     _style_titlebar(ui)
     ui.show()
     sys.exit(app.exec())
+
+
+#käsekuchen#

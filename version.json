@@ -1,9 +1,5 @@
 {
     "version": "2.0.0",
-    "changelog": "- MMP13 verbessert\n- Dual-Vorschau",
-    "files": [
-        "ui/app.py",
-        "ui/batch_worker.py",
-        "stains/mmp13.py"
-    ]
+    "changelog": "- Erste öffentliche Version",
+    "files": []
 }

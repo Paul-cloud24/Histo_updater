@@ -1,13 +1,11 @@
 # ui/update_dialog.py
 import os
 import sys
-import subprocess
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QProgressBar, QTextEdit, QFrame
 )
-from PySide6.QtCore import Qt
 
 
 class UpdateDialog(QDialog):
@@ -28,28 +26,27 @@ class UpdateDialog(QDialog):
         layout.setSpacing(12)
         layout.setContentsMargins(16, 16, 16, 16)
 
-        # Header
         lbl = QLabel(f"🎉  Version {new_version} ist verfügbar!")
         lbl.setStyleSheet("font-size:14px; font-weight:700; color:#89b4fa;")
         layout.addWidget(lbl)
 
         n = len(files)
-        lbl_files = QLabel(f"{n} Datei{'en' if n != 1 else ''} werden aktualisiert:")
+        lbl_files = QLabel(
+            f"{n} Datei{'en' if n != 1 else ''} werden aktualisiert:")
         lbl_files.setStyleSheet("color:#6c7086; font-size:11px;")
         layout.addWidget(lbl_files)
 
-        # Dateiliste
         txt = QTextEdit()
         txt.setReadOnly(True)
         txt.setFixedHeight(90)
-        txt.setPlainText("\n".join(files))
+        txt.setPlainText("\n".join(files) if files else "—")
         layout.addWidget(txt)
 
-        # Changelog
         if changelog:
             sep = QFrame()
             sep.setFrameShape(QFrame.HLine)
-            sep.setStyleSheet("background:#313244; max-height:1px; border:none;")
+            sep.setStyleSheet(
+                "background:#313244; max-height:1px; border:none;")
             layout.addWidget(sep)
             layout.addWidget(QLabel("Was ist neu:"))
             cl = QTextEdit()
@@ -58,7 +55,6 @@ class UpdateDialog(QDialog):
             cl.setPlainText(changelog)
             layout.addWidget(cl)
 
-        # Progress
         self.progress = QProgressBar()
         self.progress.setValue(0)
         self.progress.setVisible(False)
@@ -68,7 +64,6 @@ class UpdateDialog(QDialog):
         self.status_lbl.setStyleSheet("color:#6c7086; font-size:11px;")
         layout.addWidget(self.status_lbl)
 
-        # Buttons
         btn_row = QHBoxLayout()
         self.btn_later   = QPushButton("Später")
         self.btn_later.clicked.connect(self.reject)
@@ -87,15 +82,15 @@ class UpdateDialog(QDialog):
         self.progress.setVisible(True)
         self.status_lbl.setText("Lade Dateien...")
 
-        self._updater = FileUpdater(
+        self._worker = FileUpdater(
             update_repo=self.update_repo,
             files=self.files,
             app_root=self.app_root,
         )
-        self._updater.progress.connect(self._on_progress)
-        self._updater.done.connect(self._on_done)
-        self._updater.error.connect(self._on_error)
-        self._updater.run_async()
+        self._worker.progress.connect(self._on_progress)
+        self._worker.done.connect(self._on_done)
+        self._worker.error.connect(self._on_error)
+        self._worker.run_async()
 
     def _on_progress(self, pct: int, filename: str):
         self.progress.setValue(pct)
@@ -104,7 +99,6 @@ class UpdateDialog(QDialog):
     def _on_done(self):
         self.progress.setValue(100)
         self.status_lbl.setText("✔  Neustart...")
-        # App neu starten
         python = sys.executable
         os.execv(python, [python] + sys.argv)
 

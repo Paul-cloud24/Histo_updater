@@ -2,7 +2,7 @@ import os
 import time
 from PySide6.QtCore import Qt, QThreadPool, QRunnable, QObject, Signal, QWaitCondition, QMutex
 from sklearn import pipeline
-from analysis.sox9_pipeline import Sox9Pipeline, find_images_in_folder
+from analysis.core_pipeline import CoreStainPipeline, find_images_in_folder
 
 class WorkerSignals(QObject):
     progress_global = Signal(int)
@@ -34,7 +34,7 @@ class Sox9Worker(QRunnable):
 
         self.signals.progress_global.emit(10)
 
-        pipeline = Sox9Pipeline(worker=self, threshold=self.threshold, nucleus_diameter=60, positive_fraction=0.10)
+        pipeline = CoreStainPipeline(worker=self, threshold=self.threshold, nucleus_diameter=60, positive_fraction=0.10)
         result = pipeline.run(sox9_path, dapi_path,
                            output_folder=self.folder)
 

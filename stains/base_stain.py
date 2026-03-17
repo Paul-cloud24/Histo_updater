@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 
 class BaseStain(ABC):
+    implemented = False,
     name         : str  = "Unbekannt"
     version      : str  = "0.1"
     method       : str  = "rule_based"
@@ -24,7 +25,9 @@ class BaseStain(ABC):
         return False
 
     def compute_threshold_from_iso(self, iso_folder, roi_mask=None):
-        raise NotImplementedError
+        # Nur überschreiben wenn supports_iso_calibration() == True
+        # Default: gibt None zurück → batch_worker fällt auf manuellen Threshold zurück
+        return None
 
     def __repr__(self):
         return f"<{self.__class__.__name__} method={self.method} v={self.version}>"

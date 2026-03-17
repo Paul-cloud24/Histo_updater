@@ -5,21 +5,21 @@ import json
 import numpy as np
 from PIL import Image
 
-from PyQt5.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QSizePolicy, QMessageBox
 )
-from PyQt5.QtGui import (
+from PySide6.QtGui import (
     QPixmap, QImage, QPainter, QPen, QPolygonF, QColor, QFont
 )
-from PyQt5.QtCore import Qt, QPointF, pyqtSignal
+from PySide6.QtCore import Qt, QPointF, Signal
+
 
 
 class ROICanvas(QLabel):
     """Canvas auf dem das DAPI-Bild angezeigt und Polygon gezeichnet wird."""
 
-    polygon_changed = pyqtSignal()
-
+    polygon_changed = Signal()  # Signal dass sich das Polygon geändert hat (Punkte hinzugefügt, gelöscht, geschlossen)
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAlignment(Qt.AlignTop | Qt.AlignLeft)
@@ -44,7 +44,7 @@ class ROICanvas(QLabel):
         vmax = img_array.max() if img_array.max() > 0 else 1
         display = (img_array.astype(np.float32) / vmax * 255).astype(np.uint8)
 
-        qimg = QImage(display.data, w, h, w, QImage.Format_Grayscale8)
+        qimg = QImage(display.tobytes(), w, h, w, QImage.Format_Grayscale8)
         self._base_pixmap = QPixmap.fromImage(qimg)
         self._points = []
         self._closed = False
@@ -250,7 +250,7 @@ class ROIDialog(QDialog):
     Das Polygon wird als JSON neben dem Bild gespeichert.
     """
 
-    roi_confirmed = pyqtSignal(list)   # gibt normalisierte Punkte zurück
+    roi_confirmed = Signal(list)   # gibt normalisierte Punkte zurück
 
     def __init__(self, dapi_path: str, parent=None):
         super().__init__(parent)

@@ -1,135 +1,170 @@
-# ui/batch_worker.py
-from analysis.sox9_pipeline import Sox9Pipeline, find_images_in_folder
-from analysis.batch_runner  import find_sox9_folders, collect_results
-from ui.roi_dialog          import ROIDialog
-from PIL import Image
-import numpy as np
+# ui/batch_worker.py — generisch für alle Färbungen
+
 import os
 import traceback
-from PyQt5.QtCore import QRunnable, QObject, pyqtSignal, QWaitCondition, QMutex
+from PySide6.QtCore import QRunnable, QObject, Signal
 
 
 class BatchSignals(QObject):
-    progress        = pyqtSignal(int)         # 0–100 Gesamtfortschritt
-    folder_done     = pyqtSignal(str, dict)   # folder_name, result
-    folder_error    = pyqtSignal(str, str)    # folder_name, error
-    finished        = pyqtSignal(str, str)    # csv_path, plot_path
-    log             = pyqtSignal(str)         # Terminal-Log
-    roi_needed      = pyqtSignal(str, str)    # folder_name, dapi_path → UI öffnet Dialog
+    progress     = Signal(int)
+    progress_tile= Signal(int) 
+    folder_done  = Signal(str, dict)
+    folder_error = Signal(str, str)
+    finished     = Signal(str, str)
+    log          = Signal(str)
+    preview       = Signal(str, str)   # Feature 3: Marker-Bild vor Analyse
+    overlay       = Signal(str)   # Feature 3: Overlay nach Analyse
 
 
 class BatchWorker(QRunnable):
     """
-    Führt Sox9/DAPI Analyse für alle Sox9-Unterordner aus.
-    Pausiert automatisch wenn ein Ordner keine ROI hat und wartet
-    bis der Benutzer sie im ROI-Dialog eingezeichnet hat.
+    Generischer Batch-Worker für alle Färbungen.
+    Verwendet find_stain_folders() aus core_pipeline.
     """
 
-    def __init__(self, root_folder: str, threshold: int, use_roi: bool = False):
+    def __init__(self, root_folder: str, stain_name: str,
+                 threshold: int, use_roi: bool = False, pipeline_params: dict = None):
         super().__init__()
         self.root_folder = root_folder
+        self.stain_name  = stain_name   # z.B. "Sox9", "TUNEL"
         self.threshold   = threshold
+        self.use_roi     = use_roi
+        self.pipeline_params = pipeline_params or {}
         self.signals     = BatchSignals()
-        self.use_roi = use_roi
-
-        # Synchronisation Worker ↔ UI
-        self._mutex     = QMutex()
-        self._condition = QWaitCondition()
-        self._roi_ready = False   # wird von UI auf True gesetzt nach ROI-Dialog
-
-    def roi_confirmed(self):
-        """Wird vom UI-Thread aufgerufen sobald ROI gespeichert wurde."""
-        self._mutex.lock()
-        self._roi_ready = True
-        self._condition.wakeAll()
-        self._mutex.unlock()
-
-    def _wait_for_roi(self):
-        """Blockiert den Worker-Thread bis roi_confirmed() aufgerufen wird."""
-        self._mutex.lock()
-        self._roi_ready = False
-        while not self._roi_ready:
-            self._condition.wait(self._mutex)
-        self._mutex.unlock()
 
     def run(self):
+        from analysis.core_pipeline  import (find_stain_folders,
+                                              find_images_in_folder,
+                                              CoreStainPipeline)
+        from analysis.iso_threshold  import pair_sox9_iso, compute_iso_threshold
+        from stains                  import get_stain
+        from ui.roi_dialog           import ROIDialog
+        from PIL import Image
+        import numpy as np
 
-        # Am Anfang von run() — Results-Ordner einmalig anlegen
         results_root = os.path.join(self.root_folder, "Results")
         os.makedirs(os.path.join(results_root, "Overlays"), exist_ok=True)
         os.makedirs(os.path.join(results_root, "ROIs"),     exist_ok=True)
-        
-        folders   = find_sox9_folders(self.root_folder)
-        if not folders:
-            self.signals.log.emit("⚠ Keine Sox9-Unterordner gefunden.")
+
+        # Ordner finden
+        probe_folders, iso_folders = find_stain_folders(
+            self.root_folder, self.stain_name)
+
+        if not probe_folders:
+            self.signals.log.emit(
+                f"⚠ Keine {self.stain_name}-Ordner gefunden.")
             self.signals.finished.emit("", "")
             return
 
-        results   = []
-        n_folders = len(folders)
+        # Iso-Pairing
+        from analysis.iso_threshold import pair_sox9_iso
+        pairs = pair_sox9_iso(probe_folders, iso_folders)
 
-        for i, folder in enumerate(folders):
+        results   = []
+        n_folders = len(probe_folders)
+
+        for i, folder in enumerate(probe_folders):
             folder_name = os.path.basename(folder)
-            self.signals.log.emit(f"\n── [{i+1}/{n_folders}] {folder_name} ──")
+            self.signals.log.emit(
+                f"\n── [{i+1}/{n_folders}] {folder_name} ──")
 
             try:
-                sox9_path, dapi_path = find_images_in_folder(folder)
+                self.signals.progress_tile.emit(10)    # ← neu
+                marker_path, dapi_path = find_images_in_folder(folder)
 
-                # ROI prüfen
-                dapi_arr  = np.array(Image.open(dapi_path))
-                dapi_h, dapi_w = dapi_arr.shape[:2]
+                self.signals.preview.emit(marker_path, dapi_path)  # Feature 3: Marker-Bild vor Analyse
+                # ROI
+                self.signals.progress_tile.emit(20)
                 if self.use_roi:
-                    roi_mask = ROIDialog.load_roi_mask(dapi_path, dapi_h, dapi_w)
-                    roi_used = roi_mask is not None
+                    dapi_arr  = np.array(Image.open(dapi_path))
+                    dapi_h, dapi_w = dapi_arr.shape[:2]
+                    roi_mask  = ROIDialog.load_roi_mask(
+                        dapi_path, dapi_h, dapi_w)
+                    roi_used  = roi_mask is not None
                     if not roi_used:
-                        self.signals.log.emit(f"  ℹ Keine ROI gefunden → ganzes Bild")
+                        self.signals.log.emit("  ℹ Keine ROI → ganzes Bild")
                 else:
                     roi_mask = None
                     roi_used = False
-                    self.signals.log.emit(f"  ℹ Modus: Ganzes Bild")
 
-
-                # Pipeline ausführen
-                pipeline = Sox9Pipeline(
-                    worker=None,
-                    threshold=self.threshold,
-                    roi_mask=roi_mask,
-                )
-                result = pipeline.run(
-                    sox9_path=sox9_path,
-                    dapi_path=dapi_path,
-                    output_folder=results_root,
-                )
-
-                result["folder_name"] = folder_name
-                result["roi_used"]    = roi_used
-                result["status"]      = "ok"
-
-                roi_json = ROIDialog._get_json_path(dapi_path)
-                result["roi_json"] = roi_json if os.path.exists(roi_json) else None
+                # Threshold kalibrieren
+                iso_folder = pairs.get(folder)
+                if iso_folder:
+                    self.signals.log.emit(
+                        f"  Iso: {os.path.basename(iso_folder)}")
+                    iso_res   = compute_iso_threshold(
+                        iso_folder, n_sigma=2.0, roi_mask=roi_mask)
+                    threshold = iso_res["threshold"] if iso_res \
+                                else self.threshold
+                    thr_method = "iso"
+                else:
+                    threshold  = self.threshold
+                    thr_method = "manual"
+                    self.signals.log.emit(
+                        f"  ⚠ Kein Iso-Partner → Threshold={threshold}")
 
                 self.signals.log.emit(
-                    f"  ✔ DAPI: {result['n_dapi_total']}  "
-                    f"Sox9+: {result['n_positive']}  "
-                    f"Ratio: {result['ratio']:.1f}%"
+                    f"  Threshold={threshold:.1f} ({thr_method})")
+
+                # Stain-Instanz holen und analysieren
+                stain = get_stain(
+                    next(k for k in ["Sox9/DAPI", "TUNEL/DAPI", "Col1",
+                                     "Col2", "Safranin O"]
+                         if self.stain_name.lower() in k.lower())
                 )
+                self.signals.progress_tile.emit(30) 
+                result = stain.analyze(
+                    marker_path=marker_path,
+                    dapi_path=dapi_path,
+                    output_folder=results_root,
+                    roi_mask=roi_mask,
+                    threshold=threshold,
+                    threshold_method=thr_method,
+                    **self.pipeline_params,         # Feature 1: Pipeline-Parameter durchreichen
+                )
+
+                result["folder_name"]      = folder_name
+                result["roi_used"]         = roi_used
+                result["threshold_used"]   = round(threshold, 1)
+                result["threshold_method"] = thr_method
+                result["status"]           = "ok"
+
+                roi_json = ROIDialog._get_json_path(dapi_path)
+                result["roi_json"] = roi_json \
+                    if os.path.exists(roi_json) else None
+
+                n_pos = result.get("n_positive",
+                        result.get("n_apoptotic", 0))
+                ratio = result.get("ratio",
+                        result.get("apoptosis_%", 0))
+                self.signals.log.emit(
+                    f"  ✔ DAPI: {result['n_total']}  "
+                    f"positiv: {n_pos}  Ratio: {ratio:.1f}%"
+                )
+
+                if result.get("overlay"):
+                    self.signals.overlay.emit(result["overlay"])
+
                 self.signals.folder_done.emit(folder_name, result)
 
             except Exception as e:
-                self.signals.log.emit(f"  ✗ Fehler: {e}\n{traceback.format_exc()}")
+                self.signals.log.emit(
+                    f"  ✗ Fehler: {e}\n{traceback.format_exc()}")
                 self.signals.folder_error.emit(folder_name, str(e))
-                result = {
-                    "folder_name":  folder_name,
-                    "n_dapi_total": 0, "n_positive": 0,
-                    "ratio":        0.0, "roi_used": False,
-                    "status":       f"error: {e}",
-                    "overlay":      None, "roi_json": None,
-                }
+                results.append({
+                    "folder_name": folder_name, "n_total": 0,
+                    "n_positive": 0, "ratio": 0.0,
+                    "roi_used": False, "status": f"error: {e}",
+                    "overlay": None, "roi_json": None,
+                })
+                continue
 
             results.append(result)
-            self.signals.progress.emit(int((i + 1) / n_folders * 100))
+            self.signals.progress.emit(
+                int((i + 1) / n_folders * 100))
 
-        # Alle Ordner fertig → sammeln
+        # Ergebnisse sammeln
         self.signals.log.emit("\n── Ergebnisse zusammenführen ──")
+        from analysis.batch_runner import collect_results
         csv_path, plot_path = collect_results(self.root_folder, results)
         self.signals.finished.emit(csv_path or "", plot_path or "")

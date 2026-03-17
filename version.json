@@ -1,5 +1,9 @@
 {
     "version": "2.0.1",
     "changelog": "- Erste öffentliche Version",
-    "files": []
+    "files": [ 
+        "ui/updater.py",
+        "ui/update_dialog.py",
+        "ui/app.py",
+        "version.py"]
 }

@@ -124,6 +124,40 @@ class ROISuggestionDialog(QDialog):
             "border-radius:6px; color:#585b70; font-size:13px;")
         pv_layout.addWidget(self.preview_label)
         layout.addWidget(preview_grp, stretch=1)
+        
+        # ── Helligkeit / Kontrast ──────────────────────────────────────
+        from PySide6.QtWidgets import QSlider
+        ctrl_row = QHBoxLayout()
+        ctrl_row.setSpacing(8)
+
+        ctrl_row.addWidget(QLabel("☀ Helligkeit:"))
+        self.slider_brightness = QSlider(Qt.Horizontal)
+        self.slider_brightness.setRange(-100, 100)
+        self.slider_brightness.setValue(0)
+        self.slider_brightness.setFixedWidth(120)
+        self.slider_brightness.valueChanged.connect(self._on_display_changed)
+        ctrl_row.addWidget(self.slider_brightness)
+
+        ctrl_row.addSpacing(16)
+        ctrl_row.addWidget(QLabel("◑ Kontrast:"))
+        self.slider_contrast = QSlider(Qt.Horizontal)
+        self.slider_contrast.setRange(50, 200)
+        self.slider_contrast.setValue(100)
+        self.slider_contrast.setFixedWidth(120)
+        self.slider_contrast.valueChanged.connect(self._on_display_changed)
+        ctrl_row.addWidget(self.slider_contrast)
+
+        btn_reset = QPushButton("↺")
+        btn_reset.setFixedWidth(28)
+        btn_reset.setToolTip("Helligkeit/Kontrast zurücksetzen")
+        btn_reset.clicked.connect(lambda: (
+            self.slider_brightness.setValue(0),
+            self.slider_contrast.setValue(100)
+        ))
+        ctrl_row.addWidget(btn_reset)
+        ctrl_row.addStretch()
+        layout.addLayout(ctrl_row)
+        # ──────────────────────────────────────────────────────────────
 
         # Fortschrittsbalken (waehrend SAM laeuft)
         self.progress_bar = QProgressBar()
@@ -213,7 +247,7 @@ class ROISuggestionDialog(QDialog):
         if not self._polygon or self.rgb is None:
             return
 
-        rgb = self.rgb.copy()
+        rgb = self._get_adjusted_rgb()
         h, w = rgb.shape[:2]
 
         # Maske als gruene Flaeche einblenden
@@ -271,6 +305,17 @@ class ROISuggestionDialog(QDialog):
             self._render_preview()
 
     # ── Aktionen ──────────────────────────────────────────────────────
+    
+    def _on_display_changed(self):
+        self._render_preview()
+
+    def _get_adjusted_rgb(self) -> np.ndarray:
+        """Gibt Helligkeit/Kontrast-angepasstes RGB zurück."""
+        brightness = self.slider_brightness.value()
+        contrast   = self.slider_contrast.value() / 100.0
+        img = self.rgb.astype(np.float32)
+        img = img * contrast + brightness * 2.55
+        return np.clip(img, 0, 255).astype(np.uint8)
 
     def _on_confirm(self):
         """Vorschlag bestaetigen — ROI wird direkt uebernommen."""

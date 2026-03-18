@@ -7,8 +7,9 @@ from PIL import Image
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLabel, QSizePolicy, QMessageBox
+    QLabel, QSizePolicy, QMessageBox, QSlider
 )
+
 from PySide6.QtGui import (
     QPixmap, QImage, QPainter, QPen, QPolygonF, QColor, QFont
 )
@@ -34,20 +35,22 @@ class ROICanvas(QLabel):
         self._img_w       = 1
         self._img_h       = 1
 
-    def load_image(self, img_array: np.ndarray):
+    def load_image(self, img_array: np.ndarray, keep_points: bool = False):
         """Lädt ein numpy uint8 Graustufenbild."""
         h, w = img_array.shape
         self._img_w = w
         self._img_h = h
 
-        # Normieren für Anzeige
         vmax = img_array.max() if img_array.max() > 0 else 1
         display = (img_array.astype(np.float32) / vmax * 255).astype(np.uint8)
 
         qimg = QImage(display.tobytes(), w, h, w, QImage.Format_Grayscale8)
         self._base_pixmap = QPixmap.fromImage(qimg)
-        self._points = []
-        self._closed = False
+
+        if not keep_points:
+            self._points = []
+            self._closed = False
+
         self._update_display()
 
     def load_polygon(self, points_norm):
@@ -103,7 +106,6 @@ class ROICanvas(QLabel):
             self._closed = True
             self._update_display()
             self.polygon_changed.emit()
-
     # ── Events ────────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
@@ -257,6 +259,10 @@ class ROIDialog(QDialog):
         self.dapi_path   = dapi_path
         self.json_path   = self._get_json_path(dapi_path)
         self._dapi_array = None
+        self._img_paths   = []   # alle Bilder
+        self._img_index   = 0    # aktueller Index
+        self._brightness = 0    # -100 bis +100
+        self._contrast   = 1.0  # 0.5 bis 2.0
 
         self.setWindowTitle("ROI einzeichnen — DAPI-Kanal")
         self.setMinimumSize(800, 650)
@@ -284,6 +290,37 @@ class ROIDialog(QDialog):
         self.canvas.polygon_changed.connect(self._on_polygon_changed)
         layout.addWidget(self.canvas, stretch=1)
 
+        # ── Helligkeit / Kontrast ──────────────────────────────────────
+        ctrl_row = QHBoxLayout()
+        ctrl_row.setSpacing(8)
+
+        ctrl_row.addWidget(QLabel("☀ Helligkeit:"))
+        self.slider_brightness = QSlider(Qt.Horizontal)
+        self.slider_brightness.setRange(-100, 100)
+        self.slider_brightness.setValue(0)
+        self.slider_brightness.setFixedWidth(120)
+        self.slider_brightness.valueChanged.connect(self._on_display_changed)
+        ctrl_row.addWidget(self.slider_brightness)
+
+        ctrl_row.addSpacing(16)
+        ctrl_row.addWidget(QLabel("◑ Kontrast:"))
+        self.slider_contrast = QSlider(Qt.Horizontal)
+        self.slider_contrast.setRange(50, 200)   # 0.5 – 2.0 als int*100
+        self.slider_contrast.setValue(100)
+        self.slider_contrast.setFixedWidth(120)
+        self.slider_contrast.valueChanged.connect(self._on_display_changed)
+        ctrl_row.addWidget(self.slider_contrast)
+
+        self.btn_reset_display = QPushButton("↺")
+        self.btn_reset_display.setFixedWidth(28)
+        self.btn_reset_display.setToolTip("Helligkeit/Kontrast zurücksetzen")
+        self.btn_reset_display.clicked.connect(self._reset_display)
+        ctrl_row.addWidget(self.btn_reset_display)
+        ctrl_row.addStretch()
+
+        layout.addLayout(ctrl_row)
+        # ──────────────────────────────────────────────────────────────
+
         # Buttons
         btn_row = QHBoxLayout()
 
@@ -304,11 +341,24 @@ class ROIDialog(QDialog):
         )
         self.btn_ok.clicked.connect(self._on_confirm)
 
+        self.btn_save_ref = QPushButton("💾 Als Referenz speichern")
+        self.btn_save_ref.setEnabled(False)
+        self.btn_save_ref.setToolTip(
+            "Speichert diese ROI als Lernbeispiel für die automatische "
+            "Knorpel-Erkennung in zukünftigen Bildern"
+        )
+        self.btn_save_ref.clicked.connect(self._on_save_reference)
+
+        self.btn_next = QPushButton("▶ Nächster")
+        self.btn_next.setToolTip("ROI speichern und zum nächsten Bild")
+        self.btn_next.setVisible(False)   # erst sichtbar wenn > 1 Bild
+        self.btn_next.clicked.connect(self._on_next)
+
         btn_cancel = QPushButton("Abbrechen")
         btn_cancel.clicked.connect(self.reject)
 
-        for b in [self.btn_undo, self.btn_clear,
-                  self.btn_close_poly, self.btn_ok, btn_cancel]:
+        for b in [self.btn_undo, self.btn_clear, self.btn_close_poly,
+                  self.btn_save_ref, self.btn_next, self.btn_ok, btn_cancel]:
             btn_row.addWidget(b)
 
         layout.addLayout(btn_row)
@@ -324,7 +374,26 @@ class ROIDialog(QDialog):
         else:
             self._dapi_array = img
 
-        self.canvas.load_image(self._dapi_array)
+        self._refresh_canvas()
+
+    def _on_display_changed(self):
+        self._brightness = self.slider_brightness.value()
+        self._contrast   = self.slider_contrast.value() / 100.0
+        self._refresh_canvas()
+
+    def _reset_display(self):
+        self.slider_brightness.setValue(0)
+        self.slider_contrast.setValue(100)
+
+    def _refresh_canvas(self):
+        """Wendet Helligkeit/Kontrast auf die Anzeige an."""
+        if self._dapi_array is None:
+            return
+        img = self._dapi_array.astype(np.float32)
+        img = img * self._contrast
+        img = img + self._brightness * 2.55
+        img = np.clip(img, 0, 255).astype(np.uint8)
+        self.canvas.load_image(img, keep_points=True)
 
     def _try_load_existing_roi(self):
         if not os.path.exists(self.json_path):
@@ -362,12 +431,29 @@ class ROIDialog(QDialog):
     # ── Events ────────────────────────────────────────────────────────────
 
     def _on_polygon_changed(self):
-        pts = self.canvas.get_polygon_normalized()
+        pts    = self.canvas.get_polygon_normalized()
         closed = self.canvas._closed
         self.btn_ok.setEnabled(closed and len(pts) >= 3)
-        self.btn_close_poly.setEnabled(
-            len(pts) >= 3 and not closed
+        self.btn_close_poly.setEnabled(len(pts) >= 3 and not closed)
+        self.btn_save_ref.setEnabled(closed and len(pts) >= 3)
+
+    def _on_save_reference(self):
+        """Speichert aktuelle ROI als Lernreferenz für Auto-ROI."""
+        pts = self.canvas.get_polygon_normalized()
+        if len(pts) < 3:
+            return
+        from analysis.roi_learner import save_reference, get_reference_count
+        img = np.array(Image.open(self.dapi_path))
+        h, w = img.shape[:2]
+        save_reference(
+            image_path=self.dapi_path,
+            polygon_normalized=pts,
+            image_shape=(h, w),
+            stain="manual",
         )
+        n = get_reference_count()
+        self.btn_save_ref.setText(f"✔ Gespeichert  ({n} Referenzen)")
+        self.btn_save_ref.setEnabled(False)
 
     def _on_clear(self):
         reply = QMessageBox.question(
@@ -394,6 +480,66 @@ class ROIDialog(QDialog):
 
         self.roi_confirmed.emit(pts)
         self.accept()
+
+
+    def set_image_list(self, img_paths: list):
+        """Übergibt alle Bilder — aktiviert den Nächster-Button."""
+        self._img_paths = img_paths
+        self._img_index = 0
+        # Nächster nur zeigen wenn mehr als ein Bild
+        self.btn_next.setVisible(len(img_paths) > 1)
+        self._update_title()
+
+    def _update_title(self):
+        n     = len(self._img_paths)
+        i     = self._img_index + 1
+        fname = os.path.basename(self._img_paths[self._img_index]) \
+                if self._img_paths else ""
+        if n > 1:
+            self.setWindowTitle(
+                f"ROI einzeichnen  [{i}/{n}]  —  {fname}")
+            self.btn_next.setText(
+                f"▶ Nächster  ({i}/{n})" if i < n
+                else f"✔ Fertig  ({i}/{n})")
+        else:
+            self.setWindowTitle(f"ROI einzeichnen — {fname}")
+
+    def _on_next(self):
+        """ROI für aktuelles Bild speichern und zum nächsten wechseln."""
+        # Aktuelle ROI speichern (falls gezeichnet)
+        pts = self.canvas.get_polygon_normalized()
+        if len(pts) >= 3:
+            os.makedirs(os.path.dirname(self.json_path), exist_ok=True)
+            with open(self.json_path, "w") as f:
+                json.dump({
+                    "polygon_normalized": pts,
+                    "dapi_path": self.dapi_path,
+                    "n_points":  len(pts),
+                }, f, indent=2)
+            self.roi_confirmed.emit(pts)
+
+        # Nächstes Bild laden
+        self._img_index += 1
+        if self._img_index >= len(self._img_paths):
+            self.accept()
+            return
+
+        next_path      = self._img_paths[self._img_index]
+        self.dapi_path = next_path
+        self.json_path = self._get_json_path(next_path)
+
+        # Bild neu laden
+        img = np.array(Image.open(next_path))
+        self._dapi_array = img[..., 2] if img.ndim == 3 else img
+        self._refresh_canvas()
+        self.canvas._closed = False
+
+        self._try_load_existing_roi()
+        self._update_title()
+        self.info_label.setText(
+            f"Bild {self._img_index + 1} von {len(self._img_paths)}  —  "
+            "Klicke Punkte um die ROI einzuzeichnen."
+        )
 
     # ── Helpers ───────────────────────────────────────────────────────────
 

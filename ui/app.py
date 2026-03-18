@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtGui import QFont, QTextCursor, QPixmap, QImage
+import pip
 
 from stains import available_stains, get_stain
 from ui.analysis_worker import Sox9Worker
@@ -273,6 +274,33 @@ def _style_titlebar(window: QMainWindow):
             except Exception as e:
                 print(f"[Titlebar] macOS Setup fehlgeschlagen: {e}")
 
+class _TerminalRedirector:
+    """Leitet stdout/stderr in das Terminal-QTextEdit um."""
+    def __init__(self, widget):
+        self._widget = widget
+        self._buffer = ""
+
+    def write(self, text: str):
+        if not text:
+            return
+        # Zeilenweise in Widget schreiben
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            if line:
+                self._widget.append(
+                    f'<span style="color:#a6e3a1;">{line}</span>')
+        self._widget.ensureCursorVisible()
+
+    def flush(self):
+        if self._buffer:
+            self._widget.append(
+                f'<span style="color:#a6e3a1;">{self._buffer}</span>')
+            self._buffer = ""
+
+    def fileno(self):
+        raise OSError("no fileno")
+
 class HistologyUI(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -344,8 +372,18 @@ class HistologyUI(QMainWindow):
         self.btn_roi_mode = QPushButton("🔍   Modus: Ganzes Bild")
         self.btn_roi_mode.clicked.connect(self._toggle_roi_mode)
 
+        self.btn_auto_roi = QPushButton("🤖   Auto-ROI vorschlagen")
+        self.btn_auto_roi.clicked.connect(self._open_auto_roi)
+        self.btn_auto_roi.setToolTip(
+            "MobileSAM schlägt automatisch eine ROI vor\n"
+            "basierend auf gespeicherten Referenzen")
+        self._auto_roi_info = QLabel("0 Referenzen gespeichert")
+        self._auto_roi_info.setObjectName("info")
+        self._update_auto_roi_info()
+
         for w in [self.btn_threshold, self.threshold_info,
-                  self.btn_roi, self.btn_roi_mode]:
+                  self.btn_roi, self.btn_roi_mode,
+                  self.btn_auto_roi, self._auto_roi_info]:
             sl.addWidget(w)
 
         # ── Settings-Zahnrad (Feature 1) ──────────────────────────────
@@ -367,6 +405,17 @@ class HistologyUI(QMainWindow):
         gear_row.addWidget(self.btn_settings)
         gear_row.addWidget(self._settings_info)
         sl.addLayout(gear_row)
+        # ──────Reset Knopf──────────────────────────────────────────────
+        sl.addSpacing(8)
+        sl.addWidget(self._separator())
+        sl.addSpacing(4)
+        sl.addWidget(self._section_label("Reset"))
+        btn_reset = QPushButton("🗑   ROI & Referenzen löschen")
+        btn_reset.setStyleSheet(
+            "QPushButton { color: #f38ba8; border-color: #f38ba8; }")
+        btn_reset.clicked.connect(self._reset_roi_and_references)
+        sl.addWidget(btn_reset)
+
         # ──────────────────────────────────────────────────────────────
 
         sl.addStretch()
@@ -383,15 +432,51 @@ class HistologyUI(QMainWindow):
         main_layout.setContentsMargins(20, 20, 20, 16)
         main_layout.setSpacing(12)
 
-        log_label = QLabel("Analyse-Log"); log_label.setObjectName("section")
+       # ── Tab: Analyse-Log | Terminal ───────────────────────────────
+        from PySide6.QtWidgets import QTabWidget
+        self.log_tabs = QTabWidget()
+        self.log_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #313244;
+                border-radius: 6px;
+                background: #11111b;
+            }
+            QTabBar::tab {
+                background: #1e1e2e;
+                color: #6c7086;
+                border: 1px solid #313244;
+                border-bottom: none;
+                padding: 5px 14px;
+                border-radius: 4px 4px 0 0;
+                font-size: 12px;
+            }
+            QTabBar::tab:selected {
+                background: #313244;
+                color: #cdd6f4;
+                font-weight: 600;
+            }
+            QTabBar::tab:hover { color: #cdd6f4; }
+        """)
+
+        # Tab 1: Analyse-Log
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setPlaceholderText(
             "Der Analyse-Log erscheint hier...\n\n"
             "1. Ordner wählen\n2. Färbung auswählen\n"
             "3. Optional: Threshold und ROI einstellen\n4. Analyse starten")
-        main_layout.addWidget(log_label)
-        main_layout.addWidget(self.log_view, stretch=3)
+        self.log_tabs.addTab(self.log_view, "📋  Analyse-Log")
+
+        # Tab 2: Terminal (stdout/stderr)
+        self.terminal_view = QTextEdit()
+        self.terminal_view.setReadOnly(True)
+        self.terminal_view.setPlaceholderText("Terminal-Output erscheint hier...")
+        self.terminal_view.setStyleSheet(
+            "QTextEdit { font-family: 'Cascadia Code', 'Consolas', monospace; "
+            "font-size: 11px; color: #a6e3a1; background: #11111b; }")
+        self.log_tabs.addTab(self.terminal_view, "🖥  Terminal")
+
+        main_layout.addWidget(self.log_tabs, stretch=3)
 
        # ── Feature 3: Live-Vorschau (Marker | DAPI) ──────────────────
         preview_grp = QGroupBox("Aktuelles Bild")
@@ -451,6 +536,10 @@ class HistologyUI(QMainWindow):
         root.addWidget(sidebar)
         root.addWidget(main_area, stretch=1)
         self._on_stain_changed(self.stain_box.currentText())
+        import sys
+        self._stdout_redirector = _TerminalRedirector(self.terminal_view)
+        sys.stdout = self._stdout_redirector
+        sys.stderr = self._stdout_redirector
 
     # ── Helpers ───────────────────────────────────────────────────────
     def _separator(self):
@@ -478,6 +567,51 @@ class HistologyUI(QMainWindow):
         else:
             self.log_view.append(msg)
         self.log_view.ensureCursorVisible()
+
+    def _reset_roi_and_references(self):
+        reply = QMessageBox.question(
+            self, "Reset bestätigen",
+            "Folgendes wird gelöscht:\n"
+            "• Alle gespeicherten ROI-JSON Dateien im aktuellen Ordner\n"
+            "• Alle gespeicherten Lern-Referenzen (AppData)\n\n"
+            "Fortfahren?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        deleted = 0
+
+        # ROI-JSONs im aktuellen Ordner löschen
+        if self.folder:
+            import glob
+            for json_file in glob.glob(
+                    os.path.join(self.folder, "**", "*_roi.json"),
+                    recursive=True):
+                try:
+                    os.remove(json_file)
+                    deleted += 1
+                except Exception:
+                    pass
+
+        # Alle Lern-Referenzen löschen
+        from analysis.roi_learner import clear_all_references
+        clear_all_references()
+
+        # UI zurücksetzen
+        self._roi_points = None
+        self._use_roi    = False
+        self.btn_roi.setText("📐   ROI einzeichnen...")
+        self.btn_roi.setObjectName("")
+        self.btn_roi.style().unpolish(self.btn_roi)
+        self.btn_roi.style().polish(self.btn_roi)
+        self.btn_roi_mode.setText("🔍   Modus: Ganzes Bild")
+        self.btn_roi_mode.setObjectName("")
+        self.btn_roi_mode.style().unpolish(self.btn_roi_mode)
+        self.btn_roi_mode.style().polish(self.btn_roi_mode)
+        self._update_auto_roi_info()
+
+        self._log(f"✔ Reset: {deleted} ROI-JSON(s) gelöscht + alle Referenzen zurückgesetzt")
 
     # ── Feature 3: Bildvorschau ───────────────────────────────────────
     def resizeEvent(self, event):
@@ -645,22 +779,190 @@ class HistologyUI(QMainWindow):
 
     # ── ROI ───────────────────────────────────────────────────────────
     def _open_roi_dialog(self):
-        folder = self._get_first_stain_folder()              # Feature 2
-        if not folder:
+        if not self.folder:
             QMessageBox.warning(self, "Fehler", "Bitte zuerst Ordner wählen.")
             return
-        dapi_path = self._find_dapi_path_in(folder)
-        if not dapi_path:
+
+        stain_name     = self.stain_box.currentText()
+        stain          = get_stain(stain_name)
+        is_brightfield = (stain_name == "Von Kossa")
+
+        # Alle passenden Ordner sammeln
+        from analysis.core_pipeline import find_stain_folders
+        keyword = stain_name.split("/")[0]
+        probe_folders, _ = find_stain_folders(self.folder, keyword)
+
+        if not probe_folders:
+            # Kein Unterordner — aktuellen Ordner direkt verwenden
+            probe_folders = [self.folder]
+
+       # Bild-Pfade für alle Ordner ermitteln
+        img_paths = []
+        for f in probe_folders:
+            try:
+                if is_brightfield:
+                    from analysis.brightfield_pipeline import find_brightfield_image
+                    p = find_brightfield_image(f)
+                else:
+                    try:
+                        _, p = find_images_in_folder(f)
+                    except ValueError:
+                        # Kein separater DAPI — erstes Bild nehmen
+                        from analysis.brightfield_pipeline import find_brightfield_image
+                        p = find_brightfield_image(f)
+                img_paths.append(p)
+            except Exception:
+                pass
+
+        if not img_paths:
+            QMessageBox.warning(self, "Fehler", "Keine Bilder gefunden.")
             return
-        self._show_preview(dapi_path, dapi_path)                        # Feature 3: Vorschau
-        stain = get_stain(self.stain_box.currentText())
-        dlg   = stain.get_roi_dialog(dapi_path, parent=self)
+
+        dlg = stain.get_roi_dialog(img_paths[0], parent=self)
         if dlg is None:
             QMessageBox.information(self, "Info",
-                f"{self.stain_box.currentText()} benötigt keine ROI.")
+                f"{stain_name} benötigt keine ROI.")
             return
+
+        # Alle Pfade übergeben damit der Dialog durchblättern kann
+        dlg.set_image_list(img_paths)
         dlg.roi_confirmed.connect(self._on_roi_confirmed)
+        self._show_preview(img_paths[0], img_paths[0])
         dlg.exec()
+
+    def _update_auto_roi_info(self):
+        from analysis.roi_learner import get_reference_count
+        from analysis.roi_predictor import is_model_available
+        n = get_reference_count()
+        if is_model_available():
+            self._auto_roi_info.setText(f"{n} Referenzen  ✔ Modell trainiert")
+            self._auto_roi_info.setStyleSheet("color:#a6e3a1; font-size:11px;")
+        else:
+            hint = " — zu wenig" if n < 20 else " — bereit zum Training"
+            self._auto_roi_info.setText(f"{n} Referenzen{hint}")
+            self._auto_roi_info.setStyleSheet("color:#585b70; font-size:11px;")
+
+    def _open_auto_roi(self):
+        from analysis.roi_predictor import is_model_available, ROIPredictor
+        from analysis.roi_learner import get_reference_count
+
+        if not self.folder:
+            QMessageBox.warning(self, "Fehler", "Bitte zuerst Ordner wählen.")
+            return
+
+        # Modell trainiert?
+        if not is_model_available():
+            n = get_reference_count()
+            QMessageBox.information(
+                self, "Modell nicht trainiert",
+                f"Das ROI-Modell wurde noch nicht trainiert.\n\n"
+                f"Gespeicherte Referenzen: {n}\n\n"
+                f"Bitte ausführen:\n"
+                f"  python train_roi_model.py\n\n"
+                f"Empfehlung: mindestens 20 Referenzen vor dem Training."
+            )
+            return
+
+        # Bild laden
+        stain_name     = self.stain_box.currentText()
+        is_brightfield = (stain_name == "Von Kossa")
+
+        from analysis.core_pipeline import find_stain_folders
+        keyword = stain_name.split("/")[0]
+        probe_folders, _ = find_stain_folders(self.folder, keyword)
+        search_folder = probe_folders[0] if probe_folders else self.folder
+
+        try:
+            if is_brightfield:
+                from analysis.brightfield_pipeline import (
+                    find_brightfield_image, load_as_uint8_rgb)
+                img_path = find_brightfield_image(search_folder)
+                rgb = load_as_uint8_rgb(img_path)
+            else:
+                from analysis.core_pipeline import find_images_in_folder
+                from PIL import Image as PilImage
+                try:
+                    marker_path, _ = find_images_in_folder(search_folder)
+                    img_path = marker_path
+                except ValueError:
+                    from analysis.brightfield_pipeline import find_brightfield_image
+                    img_path = find_brightfield_image(search_folder)
+                raw = np.array(PilImage.open(img_path))
+                if raw.ndim == 2:
+                    rgb = np.stack([raw, raw, raw], axis=-1)
+                else:
+                    rgb = raw[..., :3]
+                rgb = (rgb / max(rgb.max(), 1) * 255).astype(np.uint8)
+        except Exception as e:
+            QMessageBox.warning(self, "Fehler", f"Bild nicht gefunden:\n{e}")
+            return
+
+        if not hasattr(self, "_roi_predictor"):
+            self._roi_predictor = ROIPredictor()
+        if not self._roi_predictor.load():
+            QMessageBox.warning(
+                    self, "Fehler",
+                    "Modell konnte nicht geladen werden.\n"
+                    "Bitte 'pip install ultralytics' ausführen."
+            )
+            return
+
+        # Vorhersage
+        self._log("  Auto-ROI: Knorpel wird erkannt...")
+        result = self._roi_predictor.predict(rgb)
+
+        if result is None:
+            QMessageBox.warning(
+                self, "Keine ROI erkannt",
+                "Das Modell konnte keinen Knorpel erkennen.\n\n"
+                "Mögliche Ursachen:\n"
+                "• Zu wenig Trainingsdaten\n"
+                "• Bild sehr unterschiedlich von Trainingsdaten\n\n"
+                "Bitte ROI manuell einzeichnen."
+            )
+            return
+
+        # Vorschlag anzeigen
+        from ui.roi_suggestion_dialog import ROISuggestionDialog
+        # estimate-Dict für den Dialog simulieren
+        estimate = {
+            "confidence": result["confidence"],
+            "n_refs":     get_reference_count(),
+            "prompt_points": [],
+        }
+        # ROISuggestionDialog direkt mit Ergebnis befüllen
+        dlg = ROISuggestionDialog(
+            image_path=img_path,
+            rgb=rgb,
+            estimate=estimate,
+            segmenter=None,
+            stain_name=stain_name,
+            parent=self,
+        )
+        # Ergebnis direkt setzen ohne SAM laufen zu lassen
+        dlg._result  = result
+        dlg._polygon = result["polygon_normalized"]
+        dlg._on_sam_done(result)
+
+        dlg.roi_confirmed.connect(self._on_auto_roi_confirmed)
+        dlg.roi_skipped.connect(lambda: self._log("  Auto-ROI übersprungen"))
+        dlg.exec()
+        self._update_auto_roi_info()
+
+    def _on_auto_roi_confirmed(self, points: list):
+        self._roi_points = points
+        self._use_roi    = True
+        self.btn_roi.setText(f"📐   ROI ✓  ({len(points)} Punkte, Auto)")
+        self.btn_roi.setObjectName("success")
+        self.btn_roi.style().unpolish(self.btn_roi)
+        self.btn_roi.style().polish(self.btn_roi)
+        self.btn_roi_mode.setText("✂️   Modus: Mit ROI")
+        self.btn_roi_mode.setObjectName("success")
+        self.btn_roi_mode.style().unpolish(self.btn_roi_mode)
+        self.btn_roi_mode.style().polish(self.btn_roi_mode)
+        self._log(f"✔ Auto-ROI übernommen  ({len(points)} Punkte)")
+        self._update_auto_roi_info()
+
 
     def _on_roi_confirmed(self, points):
         self._roi_points = points
@@ -711,27 +1013,33 @@ class HistologyUI(QMainWindow):
     def _start_update_check(self):
         try:
             from ui.updater import UpdateChecker
-            from version import VERSION, UPDATE_REPO
-            self._updater = UpdateChecker(VERSION, UPDATE_REPO)
+            from version import VERSION, UPDATE_REPO, UPDATE_BRANCH
+            self._updater = UpdateChecker(VERSION, UPDATE_REPO, UPDATE_BRANCH)
             self._updater.update_available.connect(self._on_update_found)
-            self._updater.error.connect(
-                lambda e: print(f"[Update] {e}"))
+            self._updater.error.connect(lambda e: print(f"[Update] {e}"))
             self._updater.check_async()
         except Exception:
             pass
 
-    def _on_update_found(self, new_version: str,
-                         changelog: str, files: list):
+    def _on_update_found(self, new_version: str, changelog: str, files: list):
         self._update_data = (new_version, changelog, files)
         self.btn_update.setText(f"⬆  v{new_version} verfügbar!")
         self.btn_update.setVisible(True)
-        self._update_data = ("", "", [])
-        self._start_update_check()
 
     def _on_update_clicked(self):
         from ui.update_dialog import UpdateDialog
-        from version import UPDATE_REPO
-        app_root = os.path.dirname(os.path.abspath(sys.argv[0]))
+        from version import UPDATE_REPO, UPDATE_BRANCH
+        import os, sys
+
+        executable = os.path.abspath(sys.argv[0])
+        if '.app/Contents' in executable:
+            app_root = os.path.dirname(
+                os.path.dirname(
+                    os.path.dirname(
+                        os.path.dirname(executable))))
+        else:
+            app_root = os.path.dirname(os.path.abspath(executable))
+
         new_version, changelog, files = self._update_data
         dlg = UpdateDialog(
             new_version=new_version,
@@ -775,20 +1083,30 @@ class HistologyUI(QMainWindow):
         self.log_view.clear()
         self._set_status("Analyse läuft...", "running")
         self.btn_analyze.setEnabled(False)
+
+        stain = get_stain(stain_name)
+        is_brightfield = (stain_name == "Von Kossa")
+
         try:
-            marker_path, dapi_path = find_images_in_folder(self.folder)
+            if is_brightfield:
+                from analysis.brightfield_pipeline import find_brightfield_image
+                marker_path = find_brightfield_image(self.folder)
+                dapi_path   = marker_path   # Dummy – wird in VonKossaStain ignoriert
+            else:
+                marker_path, dapi_path = find_images_in_folder(self.folder)
         except ValueError as e:
             QMessageBox.warning(self, "Fehler", str(e))
             self.btn_analyze.setEnabled(True)
             return
+
         self._show_preview(marker_path, dapi_path)                       # Feature 3
-        stain    = get_stain(stain_name)
         roi_mask = None
+        roi_ref  = marker_path if is_brightfield else dapi_path
         if self._use_roi:
             from ui.roi_dialog import ROIDialog
             from PIL import Image
-            arr      = np.array(Image.open(dapi_path))
-            roi_mask = ROIDialog.load_roi_mask(dapi_path, arr.shape[0], arr.shape[1])
+            arr      = np.array(Image.open(roi_ref))
+            roi_mask = ROIDialog.load_roi_mask(roi_ref, arr.shape[0], arr.shape[1])
         from ui.single_worker import SingleWorker
         worker = SingleWorker(
             stain=stain, marker_path=marker_path, dapi_path=dapi_path,
@@ -869,6 +1187,3 @@ def run_ui():
     _style_titlebar(ui)
     ui.show()
     sys.exit(app.exec())
-
-
-#käsekuchen#

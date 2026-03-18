@@ -69,50 +69,72 @@ class BatchWorker(QRunnable):
                 f"\n── [{i+1}/{n_folders}] {folder_name} ──")
 
             try:
-                self.signals.progress_tile.emit(10)    # ← neu
-                marker_path, dapi_path = find_images_in_folder(folder)
+                self.signals.progress_tile.emit(10)
 
-                self.signals.preview.emit(marker_path, dapi_path)  # Feature 3: Marker-Bild vor Analyse
+                # Stain-Instanz holen (vor find_images, da Von Kossa kein DAPI braucht)
+                stain_key = next(
+                    (k for k in ["Sox9/DAPI", "TUNEL/DAPI", "Col1", "Col2",
+                                 "Safranin O", "MMP13", "Von Kossa"]
+                     if self.stain_name.lower() in k.lower()),
+                    None
+                )
+                if stain_key is None:
+                    raise ValueError(
+                        f"Unbekannte Färbung: {self.stain_name}")
+                stain = get_stain(stain_key)
+
+                # Von Kossa: kein DAPI, nur ein RGB-Brightfield-Bild
+                is_brightfield = (stain_key == "Von Kossa")
+
+                if is_brightfield:
+                    from analysis.brightfield_pipeline import find_brightfield_image
+                    marker_path = find_brightfield_image(folder)
+                    dapi_path   = marker_path   # Dummy – wird nicht verwendet
+                else:
+                    marker_path, dapi_path = find_images_in_folder(folder)
+
+                self.signals.preview.emit(marker_path, dapi_path)  # Feature 3
+
                 # ROI
                 self.signals.progress_tile.emit(20)
+                roi_ref_path = marker_path  # Von Kossa: ROI über Brightfield-Bild
                 if self.use_roi:
-                    dapi_arr  = np.array(Image.open(dapi_path))
-                    dapi_h, dapi_w = dapi_arr.shape[:2]
-                    roi_mask  = ROIDialog.load_roi_mask(
-                        dapi_path, dapi_h, dapi_w)
-                    roi_used  = roi_mask is not None
+                    ref_arr = np.array(Image.open(roi_ref_path))
+                    ref_h, ref_w = ref_arr.shape[:2]
+                    roi_mask = ROIDialog.load_roi_mask(
+                        roi_ref_path, ref_h, ref_w)
+                    roi_used = roi_mask is not None
                     if not roi_used:
                         self.signals.log.emit("  ℹ Keine ROI → ganzes Bild")
                 else:
                     roi_mask = None
                     roi_used = False
 
-                # Threshold kalibrieren
-                iso_folder = pairs.get(folder)
-                if iso_folder:
-                    self.signals.log.emit(
-                        f"  Iso: {os.path.basename(iso_folder)}")
-                    iso_res   = compute_iso_threshold(
-                        iso_folder, n_sigma=2.0, roi_mask=roi_mask)
-                    threshold = iso_res["threshold"] if iso_res \
-                                else self.threshold
-                    thr_method = "iso"
-                else:
+                # Threshold kalibrieren (Iso nur für Fluoreszenz)
+                if is_brightfield:
                     threshold  = self.threshold
                     thr_method = "manual"
                     self.signals.log.emit(
-                        f"  ⚠ Kein Iso-Partner → Threshold={threshold}")
+                        f"  Darkness-Threshold={threshold}")
+                else:
+                    iso_folder = pairs.get(folder)
+                    if iso_folder:
+                        self.signals.log.emit(
+                            f"  Iso: {os.path.basename(iso_folder)}")
+                        iso_res    = compute_iso_threshold(
+                            iso_folder, n_sigma=2.0, roi_mask=roi_mask)
+                        threshold  = iso_res["threshold"] if iso_res \
+                                     else self.threshold
+                        thr_method = "iso"
+                    else:
+                        threshold  = self.threshold
+                        thr_method = "manual"
+                        self.signals.log.emit(
+                            f"  ⚠ Kein Iso-Partner → Threshold={threshold}")
+                    self.signals.log.emit(
+                        f"  Threshold={threshold:.1f} ({thr_method})")
 
-                self.signals.log.emit(
-                    f"  Threshold={threshold:.1f} ({thr_method})")
-
-                # Stain-Instanz holen und analysieren
-                stain = get_stain(
-                    next(k for k in ["Sox9/DAPI", "TUNEL/DAPI", "Col1",
-                                     "Col2", "Safranin O"]
-                         if self.stain_name.lower() in k.lower())
-                )
-                self.signals.progress_tile.emit(30) 
+                self.signals.progress_tile.emit(30)
                 result = stain.analyze(
                     marker_path=marker_path,
                     dapi_path=dapi_path,
@@ -120,7 +142,7 @@ class BatchWorker(QRunnable):
                     roi_mask=roi_mask,
                     threshold=threshold,
                     threshold_method=thr_method,
-                    **self.pipeline_params,         # Feature 1: Pipeline-Parameter durchreichen
+                    **self.pipeline_params,         # Feature 1
                 )
 
                 result["folder_name"]      = folder_name

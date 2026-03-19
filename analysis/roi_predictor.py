@@ -35,12 +35,16 @@ class ROIPredictor:
             return True
         try:
             from ultralytics import YOLO
-            from analysis.roi_trainer import get_model_path
-            path = get_model_path()
-            if not path.exists():
-                print("  [Predictor] Kein trainiertes Modell gefunden")
+            from analysis.roi_model_registry import get_active_model
+            active = get_active_model()
+            if not active:
+                print("  [Predictor] Kein aktives Modell in Registry")
                 return False
-            print(f"  [Predictor] Lade Modell: {path}")
+            path = Path(active["model_path"])
+            if not path.exists():
+                print(f"  [Predictor] Modelldatei fehlt: {path}")
+                return False
+            print(f"  [Predictor] Lade Modell: {active['name']} ({path})")
             self._model = YOLO(str(path))
             print("  [Predictor] Modell geladen ✔")
             return True

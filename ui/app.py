@@ -310,6 +310,14 @@ class HistologyUI(QMainWindow):
         self._use_roi            = False
         self._roi_points         = None
         self._batch_worker       = None
+        self._auto_roi_queue       = []
+        self._auto_roi_index       = 0
+        self._auto_roi_stain       = ""
+        self._auto_roi_results     = {}   # img_path → polygon
+        self._countdown_timer      = None
+        self._countdown_seconds    = 0
+        self._current_roi_polygon  = None
+        self._current_roi_imgpath  = None
         self._last_marker_arr    = None   # Cache für resizeEvent
         self._last_dapi_arr      = None
 
@@ -405,16 +413,6 @@ class HistologyUI(QMainWindow):
         gear_row.addWidget(self.btn_settings)
         gear_row.addWidget(self._settings_info)
         sl.addLayout(gear_row)
-        # ──────Reset Knopf──────────────────────────────────────────────
-        sl.addSpacing(8)
-        sl.addWidget(self._separator())
-        sl.addSpacing(4)
-        sl.addWidget(self._section_label("Reset"))
-        btn_reset = QPushButton("🗑   ROI & Referenzen löschen")
-        btn_reset.setStyleSheet(
-            "QPushButton { color: #f38ba8; border-color: #f38ba8; }")
-        btn_reset.clicked.connect(self._reset_roi_and_references)
-        sl.addWidget(btn_reset)
 
         # ──────────────────────────────────────────────────────────────
 
@@ -478,7 +476,7 @@ class HistologyUI(QMainWindow):
 
         main_layout.addWidget(self.log_tabs, stretch=3)
 
-       # ── Feature 3: Live-Vorschau (Marker | DAPI) ──────────────────
+      # ── Feature 3: Live-Vorschau (Marker | DAPI / Auto-ROI) ───────
         preview_grp = QGroupBox("Aktuelles Bild")
         pv_layout   = QVBoxLayout(preview_grp)
         pv_layout.setContentsMargins(6, 6, 6, 6)
@@ -502,7 +500,7 @@ class HistologyUI(QMainWindow):
         left_col.addWidget(self.preview_marker_name)
 
         right_col = QVBoxLayout()
-        self.preview_dapi = QLabel("DAPI")
+        self.preview_dapi = QLabel("DAPI / ROI")
         self.preview_dapi.setAlignment(Qt.AlignCenter)
         self.preview_dapi.setMinimumHeight(160)
         self.preview_dapi.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -518,8 +516,31 @@ class HistologyUI(QMainWindow):
         img_row.addLayout(left_col)
         img_row.addLayout(right_col)
         pv_layout.addLayout(img_row)
-        main_layout.addWidget(preview_grp, stretch=2)
+
+        # ── Countdown-Zeile (nur sichtbar während Auto-ROI Phase 1) ───
+        countdown_row = QHBoxLayout()
+        self.countdown_label = QLabel("")
+        self.countdown_label.setStyleSheet(
+            "color:#f9e2af; font-size:12px; font-weight:600;")
+        self.countdown_label.setAlignment(Qt.AlignCenter)
+
+        self.btn_adjust_roi = QPushButton("✏  Anpassen")
+        self.btn_adjust_roi.setFixedWidth(120)
+        self.btn_adjust_roi.setStyleSheet(
+            "QPushButton { background:#f38ba8; color:#1e1e2e; "
+            "font-weight:700; border-radius:6px; padding:5px; }")
+        self.btn_adjust_roi.setVisible(False)
+        self.btn_adjust_roi.clicked.connect(self._on_adjust_roi_clicked)
+
+        countdown_row.addStretch()
+        countdown_row.addWidget(self.countdown_label)
+        countdown_row.addSpacing(12)
+        countdown_row.addWidget(self.btn_adjust_roi)
+        countdown_row.addStretch()
+        pv_layout.addLayout(countdown_row)
         # ──────────────────────────────────────────────────────────────
+
+        main_layout.addWidget(preview_grp, stretch=2)
 
         progress_grp = QGroupBox("Fortschritt")
         pg = QVBoxLayout(progress_grp); pg.setSpacing(6)
@@ -845,109 +866,71 @@ class HistologyUI(QMainWindow):
     def _open_auto_roi(self):
         from analysis.roi_predictor import is_model_available, ROIPredictor
         from analysis.roi_learner import get_reference_count
+        from analysis.core_pipeline import find_stain_folders
 
         if not self.folder:
             QMessageBox.warning(self, "Fehler", "Bitte zuerst Ordner wählen.")
             return
 
-        # Modell trainiert?
         if not is_model_available():
             n = get_reference_count()
             QMessageBox.information(
                 self, "Modell nicht trainiert",
                 f"Das ROI-Modell wurde noch nicht trainiert.\n\n"
                 f"Gespeicherte Referenzen: {n}\n\n"
-                f"Bitte ausführen:\n"
-                f"  python train_roi_model.py\n\n"
+                f"Bitte ausführen:\n  python train_roi_model.py\n\n"
                 f"Empfehlung: mindestens 20 Referenzen vor dem Training."
             )
             return
 
-        # Bild laden
-        stain_name     = self.stain_box.currentText()
-        is_brightfield = (stain_name == "Von Kossa")
-
-        from analysis.core_pipeline import find_stain_folders
-        keyword = stain_name.split("/")[0]
-        probe_folders, _ = find_stain_folders(self.folder, keyword)
-        search_folder = probe_folders[0] if probe_folders else self.folder
-
-        try:
-            if is_brightfield:
-                from analysis.brightfield_pipeline import (
-                    find_brightfield_image, load_as_uint8_rgb)
-                img_path = find_brightfield_image(search_folder)
-                rgb = load_as_uint8_rgb(img_path)
-            else:
-                from analysis.core_pipeline import find_images_in_folder
-                from PIL import Image as PilImage
-                try:
-                    marker_path, _ = find_images_in_folder(search_folder)
-                    img_path = marker_path
-                except ValueError:
-                    from analysis.brightfield_pipeline import find_brightfield_image
-                    img_path = find_brightfield_image(search_folder)
-                raw = np.array(PilImage.open(img_path))
-                if raw.ndim == 2:
-                    rgb = np.stack([raw, raw, raw], axis=-1)
-                else:
-                    rgb = raw[..., :3]
-                rgb = (rgb / max(rgb.max(), 1) * 255).astype(np.uint8)
-        except Exception as e:
-            QMessageBox.warning(self, "Fehler", f"Bild nicht gefunden:\n{e}")
-            return
-
+        # Modell laden
         if not hasattr(self, "_roi_predictor"):
             self._roi_predictor = ROIPredictor()
         if not self._roi_predictor.load():
             QMessageBox.warning(
-                    self, "Fehler",
-                    "Modell konnte nicht geladen werden.\n"
-                    "Bitte 'pip install ultralytics' ausführen."
+                self, "Fehler",
+                "Modell konnte nicht geladen werden.\n"
+                "Bitte 'pip install ultralytics' ausführen."
             )
             return
 
-        # Vorhersage
-        self._log("  Auto-ROI: Knorpel wird erkannt...")
-        result = self._roi_predictor.predict(rgb)
+        # Alle Ordner sammeln
+        stain_name     = self.stain_box.currentText()
+        is_brightfield = (stain_name == "Von Kossa")
+        keyword        = stain_name.split("/")[0]
+        probe_folders, _ = find_stain_folders(self.folder, keyword)
+        if not probe_folders:
+            probe_folders = [self.folder]
 
-        if result is None:
-            QMessageBox.warning(
-                self, "Keine ROI erkannt",
-                "Das Modell konnte keinen Knorpel erkennen.\n\n"
-                "Mögliche Ursachen:\n"
-                "• Zu wenig Trainingsdaten\n"
-                "• Bild sehr unterschiedlich von Trainingsdaten\n\n"
-                "Bitte ROI manuell einzeichnen."
-            )
+        # Bild-Pfade für alle Ordner ermitteln
+        img_paths = []
+        for f in probe_folders:
+            try:
+                if is_brightfield:
+                    from analysis.brightfield_pipeline import find_brightfield_image
+                    img_paths.append(find_brightfield_image(f))
+                else:
+                    from analysis.core_pipeline import find_images_in_folder
+                    try:
+                        marker_path, _ = find_images_in_folder(f)
+                        img_paths.append(marker_path)
+                    except ValueError:
+                        from analysis.brightfield_pipeline import find_brightfield_image
+                        img_paths.append(find_brightfield_image(f))
+            except Exception as e:
+                print(f"  [Auto-ROI] Ordner übersprungen: {f} — {e}")
+
+        if not img_paths:
+            QMessageBox.warning(self, "Fehler", "Keine Bilder gefunden.")
             return
 
-        # Vorschlag anzeigen
-        from ui.roi_suggestion_dialog import ROISuggestionDialog
-        # estimate-Dict für den Dialog simulieren
-        estimate = {
-            "confidence": result["confidence"],
-            "n_refs":     get_reference_count(),
-            "prompt_points": [],
-        }
-        # ROISuggestionDialog direkt mit Ergebnis befüllen
-        dlg = ROISuggestionDialog(
-            image_path=img_path,
-            rgb=rgb,
-            estimate=estimate,
-            segmenter=None,
-            stain_name=stain_name,
-            parent=self,
-        )
-        # Ergebnis direkt setzen ohne SAM laufen zu lassen
-        dlg._result  = result
-        dlg._polygon = result["polygon_normalized"]
-        dlg._on_sam_done(result)
-
-        dlg.roi_confirmed.connect(self._on_auto_roi_confirmed)
-        dlg.roi_skipped.connect(lambda: self._log("  Auto-ROI übersprungen"))
-        dlg.exec()
-        self._update_auto_roi_info()
+        # Queue initialisieren und Phase 1 starten
+        self._auto_roi_queue   = img_paths
+        self._auto_roi_index   = 0
+        self._auto_roi_stain   = stain_name
+        self._auto_roi_results = {}
+        self._log(f"── Auto-ROI: {len(img_paths)} Ordner ──")
+        self._process_next_auto_roi()
 
     def _on_auto_roi_confirmed(self, points: list):
         self._roi_points = points
@@ -973,16 +956,296 @@ class HistologyUI(QMainWindow):
         self._log(f"ROI gesetzt: {len(points)} Punkte")
 
     def _toggle_roi_mode(self):
-        self._use_roi = not self._use_roi
         if self._use_roi:
-            self.btn_roi_mode.setText("✂️   Modus: Mit ROI")
-            self.btn_roi_mode.setObjectName("success")
-        else:
+            # ROI deaktivieren
+            self._use_roi = False
             self.btn_roi_mode.setText("🔍   Modus: Ganzes Bild")
             self.btn_roi_mode.setObjectName("")
-        self.btn_roi_mode.style().unpolish(self.btn_roi_mode)
-        self.btn_roi_mode.style().polish(self.btn_roi_mode)
+            self.btn_roi_mode.style().unpolish(self.btn_roi_mode)
+            self.btn_roi_mode.style().polish(self.btn_roi_mode)
+        else:
+            # ROI aktivieren — fragen wie
+            from PySide6.QtWidgets import QMessageBox
+            from analysis.roi_predictor import is_model_available
 
+            msg = QMessageBox(self)
+            msg.setWindowTitle("ROI-Modus wählen")
+            msg.setText("Wie soll die ROI definiert werden?")
+            msg.setIcon(QMessageBox.Question)
+
+            btn_auto   = msg.addButton(
+                "🤖  Auto-ROI (YOLO)", QMessageBox.AcceptRole)
+            btn_manual = msg.addButton(
+                "✏  Manuell einzeichnen", QMessageBox.AcceptRole)
+            btn_cancel = msg.addButton(
+                "Abbrechen", QMessageBox.RejectRole)
+            msg.setDefaultButton(btn_auto)
+            msg.exec()
+
+            clicked = msg.clickedButton()
+            if clicked == btn_cancel or clicked is None:
+                return
+
+            self._use_roi = True
+            self.btn_roi_mode.setText("✂️   Modus: Mit ROI")
+            self.btn_roi_mode.setObjectName("success")
+            self.btn_roi_mode.style().unpolish(self.btn_roi_mode)
+            self.btn_roi_mode.style().polish(self.btn_roi_mode)
+
+            if clicked == btn_auto:
+                if not is_model_available():
+                    QMessageBox.information(
+                        self, "Modell nicht trainiert",
+                        "Bitte zuerst ausführen:\n  python train_roi_model.py"
+                    )
+                    self._use_roi = False
+                    self.btn_roi_mode.setText("🔍   Modus: Ganzes Bild")
+                    self.btn_roi_mode.setObjectName("")
+                    self.btn_roi_mode.style().unpolish(self.btn_roi_mode)
+                    self.btn_roi_mode.style().polish(self.btn_roi_mode)
+                    return
+                # Auto-ROI starten → bleibt im Hauptfenster
+                self._open_auto_roi()
+            else:
+                # Manuell einzeichnen
+                self._open_roi_dialog()
+
+    # ── Auto-ROI Preview + Countdown ──────────────────────────────────
+
+    def _show_roi_preview(self, rgb: np.ndarray, polygon: list,
+                          img_path: str):
+        """
+        Zeigt ROI-Overlay im rechten Preview-Panel mit erhöhtem Kontrast.
+        """
+        if rgb is None:
+            return
+
+        # Kontrast +20% und Helligkeit +20%
+        img = rgb.astype(np.float32)
+        img = img * 1.2 + 0.2 * 255
+        img = np.clip(img, 0, 255).astype(np.uint8)
+
+        h, w = img.shape[:2]
+
+        # Polygon einzeichnen
+        if polygon and len(polygon) >= 3:
+            from PIL import Image as PilImage, ImageDraw as PilDraw
+            pil = PilImage.fromarray(img)
+            draw = PilDraw.Draw(pil)
+            pts = [(int(x * w), int(y * h)) for x, y in polygon]
+            # Grüne Füllung halbtransparent
+            overlay = PilImage.new("RGBA", pil.size, (0, 0, 0, 0))
+            ov_draw = PilDraw.Draw(overlay)
+            ov_draw.polygon(pts, fill=(0, 255, 100, 80))
+            ov_draw.line(pts + [pts[0]], fill=(0, 255, 100), width=3)
+            pil = PilImage.alpha_composite(
+                pil.convert("RGBA"), overlay).convert("RGB")
+            img = np.array(pil)
+
+        arr = img
+        hh, ww = arr.shape[:2]
+        from PySide6.QtGui import QImage, QPixmap
+        qimg = QImage(arr.tobytes(), ww, hh, ww * 3, QImage.Format_RGB888)
+        px   = QPixmap.fromImage(qimg)
+        lw   = self.preview_dapi.width()  if self.preview_dapi.width()  > 10 else 400
+        lh   = self.preview_dapi.height() if self.preview_dapi.height() > 10 else 160
+        self.preview_dapi.setPixmap(
+            px.scaled(lw, lh, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.preview_dapi_name.setText(
+            f"Auto-ROI — {os.path.basename(img_path)}")
+
+    def _start_countdown(self, img_path: str, polygon: list,
+                         seconds: int = 7):
+        """Startet den 7-Sekunden-Countdown für Auto-Analyse."""
+        from PySide6.QtCore import QTimer
+
+        self._current_roi_imgpath  = img_path
+        self._current_roi_polygon  = polygon
+        self._countdown_seconds    = seconds
+        self._countdown_paused     = False
+
+        self.btn_adjust_roi.setVisible(True)
+        self.btn_adjust_roi.setEnabled(True)
+
+        if self._countdown_timer:
+            self._countdown_timer.stop()
+
+        self._countdown_timer = QTimer(self)
+        self._countdown_timer.timeout.connect(self._tick_countdown)
+        self._countdown_timer.start(1000)
+        self._tick_countdown()   # sofort ersten Tick zeigen
+
+    def _tick_countdown(self):
+        if self._countdown_paused:
+            return
+
+        if self._countdown_seconds <= 0:
+            self._countdown_timer.stop()
+            self.countdown_label.setText("")
+            self.btn_adjust_roi.setVisible(False)
+            self._auto_analyse_current()
+            return
+
+        self.countdown_label.setText(
+            f"⏱  Analyse startet in {self._countdown_seconds}s  "
+            f"— oder '✏ Anpassen' drücken")
+        self._countdown_seconds -= 1
+
+    def _on_adjust_roi_clicked(self):
+        """Countdown stoppen und direkt den ROI-Zeichen-Dialog öffnen."""
+        if self._countdown_timer:
+            self._countdown_timer.stop()
+        self._countdown_paused = True
+        self.countdown_label.setText("⏸  Pausiert — ROI wird bearbeitet...")
+        self.btn_adjust_roi.setEnabled(False)
+
+        img_path = self._current_roi_imgpath
+        polygon  = self._current_roi_polygon
+
+        from ui.roi_dialog import ROIDialog
+        from analysis.brightfield_pipeline import load_as_uint8_rgb
+        from PIL import Image as PilImage
+
+        # Originalbild laden
+        try:
+            original = load_as_uint8_rgb(img_path)
+        except Exception:
+            original = np.array(PilImage.open(img_path).convert("RGB"))
+
+        # Graustufe für Canvas
+        gray = original.max(axis=-1) if original.ndim == 3 else original
+
+        dlg = ROIDialog(img_path, parent=self)
+        dlg._dapi_array = gray
+        dlg._refresh_canvas()
+
+        # Bestehende ROI als Startpunkt laden
+        if polygon and len(polygon) >= 3:
+            dlg.canvas.load_polygon(polygon)
+            dlg.canvas._closed = True
+            dlg._on_polygon_changed()
+
+        def _on_confirmed(pts):
+            self._current_roi_polygon = pts
+            self._auto_roi_results[img_path] = pts
+            # Preview aktualisieren
+            rgb_small = (np.array(PilImage.open(img_path).convert("RGB"))
+                         / max(1, 1) * 255).astype(np.uint8)
+            self._show_roi_preview(rgb_small, pts, img_path)
+            self._advance_to_next_folder()
+
+        dlg.roi_confirmed.connect(_on_confirmed)
+        dlg.exec()
+
+        def _on_skipped():
+            self._auto_roi_results[img_path] = polygon
+            self._advance_to_next_folder()
+
+        dlg.roi_confirmed.connect(_on_confirmed)
+        dlg.roi_skipped.connect(_on_skipped)
+        dlg.exec()
+
+    def _auto_analyse_current(self):
+        """Analyse mit aktueller ROI starten (nach Countdown)."""
+        img_path = self._current_roi_imgpath
+        polygon  = self._current_roi_polygon
+        if polygon:
+            self._auto_roi_results[img_path] = polygon
+        self._advance_to_next_folder()
+        
+    def _process_next_auto_roi(self):
+        from analysis.roi_learner import get_reference_count
+        from PIL import Image as PilImage
+
+        idx       = self._auto_roi_index
+        img_paths = self._auto_roi_queue
+        n         = len(img_paths)
+
+        if idx >= n:
+            return
+
+        img_path = img_paths[idx]
+        self._log(f"  Auto-ROI [{idx+1}/{n}]: "
+                  f"{os.path.basename(os.path.dirname(img_path))}")
+
+        # Bild laden
+        try:
+            raw = np.array(PilImage.open(img_path).convert("RGB"))
+            MAX = 1024
+            h, w = raw.shape[:2]
+            if max(h, w) > MAX:
+                scale = MAX / max(h, w)
+                raw   = np.array(PilImage.fromarray(raw).resize(
+                    (int(w * scale), int(h * scale)), PilImage.LANCZOS))
+            rgb = (raw / max(raw.max(), 1) * 255).astype(np.uint8)
+        except Exception as e:
+            self._log(f"  ✗ Bild laden: {e}")
+            self._auto_roi_index += 1
+            self._process_next_auto_roi()
+            return
+
+        # Linkes Panel: Marker-Bild
+        self._show_preview(img_path, img_path)
+        self._log(f"  🤖 YOLO sucht Knorpel-ROI...")
+
+        # YOLO Vorhersage
+        result  = self._roi_predictor.predict(rgb)
+        polygon = result["polygon_normalized"] if result else []
+
+        if result:
+            self._log(f"  ✔ ROI erkannt  "
+                      f"Konfidenz: {result['confidence']*100:.0f}%  "
+                      f"Fläche: {result['mask'].mean()*100:.1f}%  "
+                      f"({len(polygon)} Punkte)")  # ← neu
+        else:
+            self._log("  ⚠ Keine ROI erkannt — Ganzes Bild wird verwendet")  # ← neu
+
+
+        # Rechtes Panel: ROI-Overlay + Countdown
+        self._show_roi_preview(rgb, polygon, img_path)
+        self._start_countdown(img_path, polygon, seconds=7)
+
+    def _advance_to_next_folder(self):
+        """Zum nächsten Ordner in Phase 1 gehen."""
+        self.countdown_label.setText("")
+        self.btn_adjust_roi.setVisible(False)
+        self._auto_roi_index += 1
+
+        if self._auto_roi_index < len(self._auto_roi_queue):
+            # Nächster Ordner
+            self._process_next_auto_roi()
+        else:
+            # Phase 1 abgeschlossen → Phase 2: Alle analysieren
+            self._log(f"✔ Alle ROIs festgelegt — starte Batch-Analyse...")
+            self._run_auto_roi_batch()
+
+    def _run_auto_roi_batch(self):
+        """Phase 2: Alle Ordner mit ihren ROIs analysieren."""
+        from stains import get_stain
+        from ui.roi_dialog import ROIDialog
+        import json
+
+        stain_name = self._auto_roi_stain
+        stain      = get_stain(stain_name)
+
+        # ROI-JSONs temporär speichern
+        for img_path, polygon in self._auto_roi_results.items():
+            if not polygon:
+                continue
+            json_path = ROIDialog._get_json_path(img_path)
+            os.makedirs(os.path.dirname(json_path), exist_ok=True)
+            with open(json_path, "w") as f:
+                json.dump({
+                    "polygon_normalized": polygon,
+                    "dapi_path":          img_path,
+                    "n_points":           len(polygon),
+                    "auto_roi":           True,   # Markierung: nicht als Referenz speichern
+                }, f, indent=2)
+
+        # Batch starten
+        self._use_roi = True
+        self._start_batch(stain_name)
+    
     def _find_dapi_path_in(self, folder: str):
         try:
             _, dapi_path = find_images_in_folder(folder)

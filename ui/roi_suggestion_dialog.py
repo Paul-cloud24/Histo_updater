@@ -325,12 +325,35 @@ class ROISuggestionDialog(QDialog):
         self.accept()
 
     def _on_redraw(self):
-        """Oeffnet manuellen ROI-Dialog zum Neu-Zeichnen."""
+        """Öffnet manuellen ROI-Dialog zum Neu-Zeichnen."""
         from ui.roi_dialog import ROIDialog
+        from analysis.brightfield_pipeline import load_as_uint8_rgb
+
+        # Originalbild laden (nicht das skalierte rgb!)
+        try:
+            original_rgb = load_as_uint8_rgb(self.image_path)
+        except Exception:
+            from PIL import Image as PilImage
+            original_rgb = np.array(
+                PilImage.open(self.image_path).convert("RGB"))
+
         dlg = ROIDialog(self.image_path, parent=self)
-        # Vorschlag als Startpunkt laden (falls vorhanden)
+
+        # Canvas mit Original-Bild befüllen — Graustufe für DAPI-Kanal
+        if original_rgb.ndim == 3:
+            # Hellsten Kanal nehmen (Marker oder DAPI je nach Färbung)
+            gray = original_rgb.max(axis=-1)
+        else:
+            gray = original_rgb
+
+        dlg._dapi_array = gray
+        dlg._refresh_canvas()
+
         if self._polygon:
             dlg.canvas.load_polygon(self._polygon)
+            dlg.canvas._closed = True
+            dlg._on_polygon_changed()
+
         dlg.roi_confirmed.connect(self._on_manual_confirmed)
         dlg.exec()
 

@@ -6,7 +6,6 @@ import threading
 import urllib.request
 from PySide6.QtCore import QObject, Signal
 
-
 GITHUB_RAW = "https://raw.githubusercontent.com"
 
 
@@ -15,10 +14,12 @@ class UpdateChecker(QObject):
     up_to_date       = Signal()
     error            = Signal(str)
 
-    def __init__(self, current_version: str, update_repo: str):
+    def __init__(self, current_version: str, update_repo: str,
+                 update_branch: str = "main"):
         super().__init__()
         self.current_version = current_version
         self.update_repo     = update_repo
+        self.update_branch   = update_branch
 
     def check_async(self):
         t = threading.Thread(target=self._check, daemon=True)
@@ -26,7 +27,7 @@ class UpdateChecker(QObject):
 
     def _check(self):
         try:
-            url  = f"{GITHUB_RAW}/{self.update_repo}/main/version.json"
+            url  = f"{GITHUB_RAW}/{self.update_repo}/{self.update_branch}/version.json"
             req  = urllib.request.Request(
                 url, headers={"User-Agent": "HistoAnalyzer"})
             with urllib.request.urlopen(req, timeout=8) as resp:
@@ -59,11 +60,13 @@ class FileUpdater(QObject):
     done     = Signal()
     error    = Signal(str)
 
-    def __init__(self, update_repo: str, files: list, app_root: str):
+    def __init__(self, update_repo: str, files: list, app_root: str,
+                 update_branch: str = "main"):
         super().__init__()
-        self.update_repo = update_repo
-        self.files       = files
-        self.app_root    = app_root
+        self.update_repo   = update_repo
+        self.files         = files
+        self.app_root      = app_root
+        self.update_branch = update_branch
 
     def run_async(self):
         t = threading.Thread(target=self._run, daemon=True)
@@ -75,7 +78,7 @@ class FileUpdater(QObject):
             for i, rel_path in enumerate(self.files):
                 self.progress.emit(int(i / n * 90), rel_path)
 
-                url = f"{GITHUB_RAW}/{self.update_repo}/main/{rel_path}"
+                url = f"{GITHUB_RAW}/{self.update_repo}/{self.update_branch}/{rel_path}"
                 req = urllib.request.Request(
                     url, headers={"User-Agent": "HistoAnalyzer"})
                 with urllib.request.urlopen(req, timeout=10) as resp:

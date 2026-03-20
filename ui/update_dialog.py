@@ -1,6 +1,7 @@
 # ui/update_dialog.py
 import os
 import sys
+from version import UPDATE_REPO, UPDATE_BRANCH
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout,
@@ -77,6 +78,7 @@ class UpdateDialog(QDialog):
 
     def _start_update(self):
         from ui.updater import FileUpdater
+        from version import UPDATE_BRANCH 
         self.btn_install.setEnabled(False)
         self.btn_later.setEnabled(False)
         self.progress.setVisible(True)

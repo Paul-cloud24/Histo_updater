@@ -20,6 +20,7 @@ from ui.platform_patch import (
 
 from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtGui import QFont, QTextCursor, QPixmap, QImage
+import pip
 
 from stains import available_stains, get_stain
 from ui.analysis_worker import Sox9Worker
@@ -1461,6 +1462,3 @@ def run_ui():
     ui.raise_()
     ui.activateWindow()
     sys.exit(app.exec())
-
-
-#käsekuchen#

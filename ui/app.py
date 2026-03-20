@@ -12,6 +12,12 @@ from PySide6.QtWidgets import (
     QComboBox, QStatusBar, QFileDialog, QFrame, QDialog, QMessageBox,
     QSizePolicy
 )
+
+from ui.platform_patch import (
+    apply_stylesheet_patch, get_sidebar_width,
+    style_titlebar, activate_app
+)
+
 from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtGui import QFont, QTextCursor, QPixmap, QImage
 
@@ -308,7 +314,7 @@ class HistologyUI(QMainWindow):
         # ── Sidebar ───────────────────────────────────────────────────
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(270)
+        sidebar.setFixedWidth(get_sidebar_width())
         sl = QVBoxLayout(sidebar)
         sl.setContentsMargins(16, 20, 16, 16)
         sl.setSpacing(4)
@@ -864,11 +870,14 @@ class HistologyUI(QMainWindow):
 
 def run_ui():
     app = QApplication(sys.argv)
-    app.setStyleSheet(STYLESHEET)
+    app.setApplicationName("Histo Analyzer")
+    app.setApplicationDisplayName("Histo Analyzer")
+    stylesheet = apply_stylesheet_patch(STYLESHEET)
+    app.setStyleSheet(stylesheet)
+    activate_app()
     ui = HistologyUI()
-    _style_titlebar(ui)
+    style_titlebar(ui)
     ui.show()
+    ui.raise_()
+    ui.activateWindow()
     sys.exit(app.exec())
-
-
-#käsekuchen#

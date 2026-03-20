@@ -2,6 +2,17 @@
     "version": "2.0.2",
     "changelog": "- updated ROI and settings",
     "files": [ 
-        "ui/"
+        "ui/app.py",
+        "ui/platform_patch.py",
+        "ui/batch_worker.py",
+        "ui/single_worker.py",
+        "ui/settings_dialog.py",
+        "ui/update_dialog.py",
+        "ui/updater.py",
+        "stains/mmp13.py",
+        "stains/__init__.py",
+        "stains/sox9_stain.py",
+        "analysis/core_pipeline.py",
+        "version.py"
         ]
 }

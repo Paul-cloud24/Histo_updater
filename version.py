@@ -1,3 +1,3 @@
-VERSION     = "2.0.1"
+VERSION     = "2.0.2"
 UPDATE_REPO = "Paul-cloud24/Histo_updater"
-UPDATE_BRACH = "windows"
+UPDATE_BRANCH = "macos"

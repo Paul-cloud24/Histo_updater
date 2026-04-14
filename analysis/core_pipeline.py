@@ -224,22 +224,19 @@ class CoreStainPipeline:
         self.stardist_model = None
         if use_stardist:
             try:
-                # Symlink-Problem auf Windows umgehen
                 import platform
                 if platform.system() == "Windows":
-                    import pathlib
+                    import pathlib, shutil
                     keras_dir = pathlib.Path.home() / ".keras" / "models" / "StarDist2D" / "2D_versatile_fluo"
                     target    = keras_dir / "2D_versatile_fluo"
                     extracted = keras_dir / "2D_versatile_fluo_extracted"
                     if extracted.exists() and not target.exists():
-                        # Symlink durch echte Kopie ersetzen
-                        import shutil
                         shutil.copytree(str(extracted), str(target))
-                        print(f"[StarDist] Modellordner kopiert (kein Symlink)")
+                        print(f"[StarDist] Modellordner kopiert ✔")
 
                 from stardist.models import StarDist2D
                 if CoreStainPipeline._stardist_model is None:
-                    print(f"[{stain_name}] Lade StarDist '2D_versatile_fluo'...")
+                    print(f"[{stain_name}] Lade StarDist...")
                     CoreStainPipeline._stardist_model = \
                         StarDist2D.from_pretrained("2D_versatile_fluo")
                     print(f"[{stain_name}] StarDist geladen ✔")
